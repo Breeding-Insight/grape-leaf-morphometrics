@@ -9,7 +9,7 @@ This project aims to enhance an existing pipeline for the automated analysis of 
     Develop a Python pipeline using a cutting-edge Mask R-CNN to automatically extract key morphological traits from grape leaf images.
     Analyze traits, including leaf area, length, width, height, serration, and lobe count.
     Process historical leaf photographs from the Geneva location.
-    Create a reliable, reproducible workflow for future leaf analysis
+    Create a reliable, reproducible workflow for future leaf analysis.
     
 ## Scope
 
@@ -19,8 +19,8 @@ This project aims to enhance an existing pipeline for the automated analysis of 
         Analysis of specified leaf traits (area, length, width, height, serration, lobe count, perimeter, color, venation)
         Documentation of the pipeline for future use
         Training materials for team members with varying levels of Python experience
-
-   Out of Scope:
+    
+    Out of Scope:
        Development of mobile applications or web interfaces
        Integration with other plant phenotyping systems
        Real-time analysis capabilities
