@@ -21,9 +21,9 @@ This project aims to enhance an existing pipeline for the automated analysis of 
         Training materials for team members with varying levels of Python experience
 
    Out of Scope:
-        Development of mobile applications or web interfaces
-        Integration with other plant phenotyping systems
-        Real-time analysis capabilities
+       Development of mobile applications or web interfaces
+       Integration with other plant phenotyping systems
+       Real-time analysis capabilities
 
 ## Deliverables
 
