@@ -1,23 +1,20 @@
 # grape-leaf-morphometrics
-Extract the following traits from leaf images: area, length, width, height, serration, and lobe count.
 
-## Goals
+Develop a Python pipeline using a cutting-edge Mask R-CNN to automatically extract key morphological traits from grape leaf images.
+Analyze traits, including leaf area, length, width, height, serration, and lobe count.
+Process historical leaf photographs from the Geneva location
+Create a reliable, reproducible workflow for future leaf analysis
 
-    Develop a Python pipeline using a cutting-edge Mask R-CNN to automatically extract key morphological traits from grape leaf images.
-    Analyze traits, including leaf area, length, width, height, serration, and lobe count.
-    Process historical leaf photographs from the Geneva location
-    Create a reliable, reproducible workflow for future leaf analysis
-
-    ### Pipeline requirements:
+## Pipeline requirements:
     
-        Python scripts will be executable to enable client deployment.
-        Python script will be able to be run locally on minimal computational resources.
+Python scripts will be executable to enable client deployment.
+Python script will be able to be run locally on minimal computational resources.
 
-    ### User requirements
+## User requirements
     
-        Command-line tools 
-        Running Python scripts Tools
-        Handling python environments
+Command-line tools 
+Running Python scripts Tools
+Handling python environments
 
 ## Description
 
