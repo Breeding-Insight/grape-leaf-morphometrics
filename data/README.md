@@ -4,10 +4,10 @@ This repository contains code for analyzing grape leaf metrics using computer vi
 
 ## Repository Structure
 
-The project is organized as follows:
+The project on csubi2 is organized as follows:
 
 ```
-grape_leaf_metrics/
+workdir/data/grape/grape_pheno/grape_leaf_metrics/
 ├── configs/                 # Configuration files
 │   └── torch_nightly_cuda12.6-env.yaml  # Conda environment configuration
 │
@@ -22,6 +22,7 @@ grape_leaf_metrics/
 ├── models/                  # Trained models
 │   └── mask_rcnn/           # Mask R-CNN model files
 │       └── checkpoints_*/   # Model checkpoints from various training runs
+|           └── final_checkpoint.pth # Most up to data checkpoint for further training and inference 
 │
 └── scripts/                 # Analysis and utility scripts
 ```
