@@ -48,16 +48,16 @@ This project aims to enhance an existing pipeline for the automated analysis of 
         Recommendations for future enhancements
 
 
-## Pipeline requirements
-    
-Python scripts will be executable to enable client deployment.
-Python script can be run locally on minimal computational resources.
+## Requirements
 
-## User requirements
-    
-Command-line tools 
-Running Python scripts Tools
-Handling python environments
+    Dev reqs: 
+       Python scripts will be executable to enable client deployment.
+       Python script can be run locally on minimal computational resources.
+
+    User reqs:
+        Command-line tools 
+        Running Python scripts Tools
+        Handling python environments
 
 
 
