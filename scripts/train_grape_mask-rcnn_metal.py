@@ -213,6 +213,13 @@ def main():
             print(f"Warning: {name} annotations file not found at {path}")
         print("Please ensure all annotation files exist before proceeding.")
 
+    # Initiate early stopping parameters, adjust these parameters to change the auto-stop functionality
+    early_stopping_patience = 3  # Number of epochs to wait for improvement
+    early_stopping_min_delta = 0.001  # Minimum change to qualify as improvement
+    early_stopping_counter = 0  # Counter for epochs without improvement
+    best_val_loss = float('inf')  # Already defined in your code
+
+
     # Create checkpoint directory with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     checkpoint_dir = os.path.join(checkpoint_path, f"checkpoints_{timestamp}")
@@ -236,7 +243,7 @@ def main():
     # Training dataset
     train_dataset = LeafDataset(train_dir, train_annotations_file, get_transform(train=True))
     train_loader = torch.utils.data.DataLoader(
-        train_dataset, 
+        train_dataset,
         batch_size=16,
         shuffle=True,
         num_workers=2,  # Try with just 1 worker
@@ -375,11 +382,30 @@ def main():
         log_message(f"  Epoch {epoch+1} training completed. Average Loss: {avg_train_loss:.4f}")
 
         # Validation phase
-        # Validation phase
         val_loss = None
         if val_loader:
             val_loss = evaluate_model(model, val_loader, device, log_message)
             log_message(f"  Validation Loss: {val_loss:.4f}")
+            
+        # Early stopping check
+        if val_loss is not None:
+            if val_loss < best_val_loss - early_stopping_min_delta:
+                # Improvement found, reset counter
+                early_stopping_counter = 0
+                best_val_loss = val_loss
+                # Save best model
+                best_model_path = os.path.join(checkpoint_dir, 'mask_rcnn_best_model.pth')
+                torch.save(checkpoint, best_model_path)
+                log_message(f"  New best model saved to {best_model_path} (val_loss: {best_val_loss:.4f})")
+            else:
+                # No improvement
+                early_stopping_counter += 1
+                log_message(f"  No improvement in validation loss. Early stopping counter: {early_stopping_counter}/{early_stopping_patience}")
+
+            # Check if early stopping criteria is met
+            if early_stopping_counter >= early_stopping_patience:
+                log_message(f"  Early stopping triggered after {epoch+1} epochs")
+                break
 
         # Update learning rate
         lr_scheduler.step()
