@@ -5,10 +5,10 @@ Dataset: The dataset is loaded from COCO-formatted annotations.
 Model: The model is initialized with pre-trained weights.
 Training: The model is trained for a specified number of epochs.
 Checkpoints: The script supports resuming training from checkpoints and saving checkpoints at each epoch.
-Evaluation: The model is evaluated on validation and test sets.
+Evaluation: The model is evaluated on a validation set.
 Logging: Comprehensive logging and error handling are included.
 Framework: The training is performed using the PyTorch framework.
-Devices: The script is designed to run on various devices (CUDA, MPS, or CPU) based on availability.
+Devices: The script is optimized for metal but can run on various devices (CUDA, MPS, or CPU) based on availability.
 Author: aja294@cornell.edu
 '''
 
@@ -102,10 +102,23 @@ class LeafDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.ids)
-    
+
 
 # Define top level functions
-## instance segmentation model
+## Utility functions
+### Transform
+def get_transform(train):
+    transforms = []
+    transforms.append(T.ToTensor())
+    if train:
+        transforms.append(T.RandomHorizontalFlip(0.5))
+    return T.Compose(transforms)
+
+### Collate
+def collate_fn(batch):
+    return tuple(zip(*batch))
+
+### Instance segmentation model
 def get_instance_segmentation_model(num_classes):
     weights = torchvision.models.detection.MaskRCNN_ResNet50_FPN_Weights.DEFAULT
     model = torchvision.models.detection.maskrcnn_resnet50_fpn(weights=weights)
@@ -117,20 +130,186 @@ def get_instance_segmentation_model(num_classes):
     model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask, hidden_layer, num_classes)
     return model
 
+### Create symlink
+def create_symlink(checkpoint_dir, log_message):
+    """
+    Create symlink to latest checkpoint directory
 
-## transform function
-def get_transform(train):
-    transforms = []
-    transforms.append(T.ToTensor())
-    if train:
-        transforms.append(T.RandomHorizontalFlip(0.5))
-    return T.Compose(transforms)
+    Args:
+        checkpoint_dir (str): Path to the checkpoint directory to link to
+        log_message (function): Function to log messages
+    """
+    # Extract the base directory (without the checkpoints_timestamp part)
+    base_dir = os.path.dirname(checkpoint_dir)
+    latest_link = os.path.join(base_dir, "latest")
+
+    # Check if the symlink already exists and remove it
+    if os.path.exists(latest_link):
+        try:
+            if os.path.islink(latest_link):
+                # Use appropriate method based on platform
+                if os.name == 'nt':  # Windows
+                    os.remove(latest_link)
+                else:  # Unix-like
+                    os.unlink(latest_link)
+            else:
+                # It exists but is not a symlink (e.g., a directory)
+                log_message(f"Warning: {latest_link} exists but is not a symlink. Removing it.")
+                if os.path.isdir(latest_link):
+                    import shutil
+                    shutil.rmtree(latest_link)
+                else:
+                    os.remove(latest_link)
+
+            log_message(f"Removed existing symlink: {latest_link}")
+        except Exception as e:
+            log_message(f"Error removing existing symlink: {e}")
+            return  # Exit if we can't remove the existing symlink
+
+    # Create the symlink pointing to the current checkpoint directory
+    try:
+        # Handle different platforms
+        if os.name == 'nt':  # Windows
+            # On Windows, we need admin privileges for symlinks or developer mode enabled
+            # Use directory junction as an alternative if symlink fails
+            try:
+                os.symlink(checkpoint_dir, latest_link, target_is_directory=True)
+            except:
+                # If symlink fails, try using a directory junction (Windows-specific)
+                import subprocess
+                subprocess.check_call(['mklink', '/J', latest_link, checkpoint_dir], shell=True)
+        else:  # Unix-like
+            os.symlink(checkpoint_dir, latest_link)
+
+        log_message(f"Created symlink to latest checkpoint directory: {latest_link} -> {checkpoint_dir}")
+    except Exception as e:
+        log_message(f"Error creating symlink: {e}")
+
+## Define setup paths
+def setup_paths_and_logging(base_path, models_path):
+    """
+    Setup paths, directories and logging infrastructure
+
+    Args:
+        base_path (str): Base path for data and annotations
+        models_path (str): Path where model checkpoints will be stored
+
+    Returns:
+        tuple: Contains the following elements:
+            - train_dir (str): Directory containing training data
+            - val_dir (str): Directory containing validation data
+            - train_annotations_file (str): Path to training annotations file
+            - val_annotations_file (str): Path to validation annotations file
+            - checkpoint_dir (str): Directory where checkpoints will be stored
+            - log_message (function): Function to log messages to console and file
+    """
+    # Define directories for train and validation
+    train_dir = os.path.join(base_path, "coco", "train")
+    val_dir = os.path.join(base_path, "coco", "valid")
+
+    # Define annotation files
+    train_annotations_file = os.path.join(train_dir, "_annotations.coco.json")
+    val_annotations_file = os.path.join(val_dir, "_annotations.coco.json")
+
+    # Create directories if they don't exist
+    for directory in [train_dir, val_dir]:
+        os.makedirs(directory, exist_ok=True)
+
+    print(f"Data path: {base_path}")
+    print(f"Train path: {train_dir}")
+    print(f"Validation path: {val_dir}")
+
+    # Check if annotation files exist
+    missing_files = []
+    for file_path, name in [(train_annotations_file, "Training"),
+                            (val_annotations_file, "Validation")]:
+        if not os.path.exists(file_path):
+            missing_files.append((name, file_path))
+
+    if missing_files:
+        for name, path in missing_files:
+            print(f"Warning: {name} annotations file not found at {path}")
+        print("Please ensure all annotation files exist before proceeding.")
+
+    # Create checkpoint directory with timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_dir = os.path.join(models_path, f"checkpoints_{timestamp}")
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Checkpoint directory: {checkpoint_dir}")
+
+    # Create log file
+    log_file = os.path.join(checkpoint_dir, "training_log.txt")
+
+    # Define log function
+    def log_message(message):
+        """Write message to log file and print to console"""
+        print(message)
+        with open(log_file, "a") as f:
+            f.write(f"{message}\n")
+
+    # Log initial message
+    log_message(f"=== Training started at {timestamp} ===")
+
+    return train_dir, val_dir, train_annotations_file, val_annotations_file, checkpoint_dir, log_message, timestamp
 
 
-## collate fn
-def collate_fn(batch):
-    return tuple(zip(*batch))
+def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_file, log_message):
+    """
+    Load datasets and create data loaders
 
+    Args:
+        train_dir (str): Directory containing training data
+        val_dir (str): Directory containing validation data
+        train_annotations_file (str): Path to training annotations file
+        val_annotations_file (str): Path to validation annotations file
+        log_message (function): Function to log messages
+
+    Returns:
+        tuple: Contains the following elements:
+            - train_loader (DataLoader): DataLoader for training data
+            - val_loader (DataLoader or None): DataLoader for validation data
+            - num_classes (int): Number of classes in the dataset (including background)
+    """
+    log_message("Loading datasets...")
+
+    # Training dataset
+    train_dataset = LeafDataset(train_dir, train_annotations_file, get_transform(train=True))
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=16,
+        shuffle=True,
+        num_workers=2,
+        collate_fn=collate_fn,
+        persistent_workers=True
+    )
+    log_message(f"Training dataset loaded with {len(train_dataset)} images")
+
+    # Get number of classes from training dataset
+    num_classes = len(train_dataset.coco.coco.getCatIds()) + 1  # +1 for background
+    log_message(f"Number of classes: {num_classes}")
+
+    # Validation dataset
+    val_dataset = None
+    val_loader = None
+    if os.path.exists(val_annotations_file):
+        val_dataset = LeafDataset(val_dir, val_annotations_file, get_transform(train=False))
+        val_loader = torch.utils.data.DataLoader(
+            val_dataset, 
+            batch_size=2, 
+            shuffle=False, 
+            num_workers=0, 
+            collate_fn=collate_fn
+        )
+        log_message(f"Validation dataset loaded with {len(val_dataset)} images")
+    else:
+        log_message("WARNING: Validation dataset not available")
+
+    # Check if the training dataset is not empty
+    if len(train_dataset) == 0:
+        log_message("ERROR: Training dataset is empty!")
+        raise ValueError("Training dataset contains no images")
+
+    return train_loader, val_loader, num_classes
 
 ## Model eval
 def evaluate_model(model, data_loader, device, log_message=print):
@@ -174,136 +353,42 @@ def evaluate_model(model, data_loader, device, log_message=print):
         log_message(f"Error during evaluation: {e}")
         traceback.print_exc()
         return float('inf')
-    
 
-def main():
-    # Set the path to your annotated images and annotations
-    data_path = "/Users/aja294/Documents/Grape_local/projects/leaf_morphometrics/data/annotations"
-    checkpoint_path = "/Users/aja294/Documents/Grape_local/projects/leaf_morphometrics/models/mask_rcnn"
+def setup_model_and_optimization(num_classes, device, log_message, base_checkpoint_dir=None):
+    """
+    Initialize model, optimizer, scheduler, and load checkpoint if available
 
-    # Define directories for train, validation, and test
-    train_dir = os.path.join(data_path, "coco", "train")
-    val_dir = os.path.join(data_path, "coco", "valid")
-    test_dir = os.path.join(data_path, "coco", "test")
+    Args:
+        num_classes (int): Number of classes for model output
+        device (torch.device): Device to run model on (cuda, mps, or cpu)
+        log_message (function): Function to log messages
+        base_checkpoint_dir (str, optional): Directory to look for checkpoints. If None, starts from scratch.
 
-    # Define annotation files
-    train_annotations_file = os.path.join(train_dir, "_annotations.coco.json")
-    val_annotations_file = os.path.join(val_dir, "_annotations.coco.json")
-    test_annotations_file = os.path.join(test_dir, "_annotations.coco.json")
-
-     # Create directories if they don't exist
-    for directory in [train_dir, val_dir, test_dir]:
-        os.makedirs(directory, exist_ok=True)
-
-    print(f"Data path: {data_path}")
-    print(f"Train path: {train_dir}")
-    print(f"Validation path: {val_dir}")
-    print(f"Test path: {test_dir}")
-
-    # Check if annotation files exist
-    missing_files = []
-    for file_path, name in [(train_annotations_file, "Training"), 
-                            (val_annotations_file, "Validation"), 
-                            (test_annotations_file, "Testing")]:
-        if not os.path.exists(file_path):
-            missing_files.append((name, file_path))
-
-    if missing_files:
-        for name, path in missing_files:
-            print(f"Warning: {name} annotations file not found at {path}")
-        print("Please ensure all annotation files exist before proceeding.")
-
-    # Initiate early stopping parameters, adjust these parameters to change the auto-stop functionality
-    early_stopping_patience = 3  # Number of epochs to wait for improvement
-    early_stopping_min_delta = 0.001  # Minimum change to qualify as improvement
-    early_stopping_counter = 0  # Counter for epochs without improvement
-    best_val_loss = float('inf')  # Already defined in your code
-
-
-    # Create checkpoint directory with timestamp
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    checkpoint_dir = os.path.join(checkpoint_path, f"checkpoints_{timestamp}")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    print(f"Checkpoint directory: {checkpoint_dir}")
-
-    # Create log file
-    log_file = os.path.join(checkpoint_dir, "training_log.txt")
-
-    def log_message(message):
-        """Write message to log file and print to console"""
-        print(message)
-        with open(log_file, "a") as f:
-            f.write(f"{message}\n")
-
-    log_message(f"=== Training started at {timestamp} ===")
-
-    # Load the datasets
-    log_message("Loading datasets...")
-
-    # Training dataset
-    train_dataset = LeafDataset(train_dir, train_annotations_file, get_transform(train=True))
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=16,
-        shuffle=True,
-        num_workers=2,  # Try with just 1 worker
-        collate_fn=collate_fn,
-        persistent_workers=True
-    )
-    log_message(f"Training dataset loaded with {len(train_dataset)} images")
-
-    # Validation dataset
-    val_dataset = None
-    val_loader = None
-    if os.path.exists(val_annotations_file):
-        val_dataset = LeafDataset(val_dir, val_annotations_file, get_transform(train=False))
-        val_loader = torch.utils.data.DataLoader(
-            val_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn
-        )
-        log_message(f"Validation dataset loaded with {len(val_dataset)} images")
-    else:
-        log_message("Validation dataset not available")
-
-    # Test dataset
-    test_dataset = None
-    test_loader = None
-    if os.path.exists(test_annotations_file):
-        test_dataset = LeafDataset(test_dir, test_annotations_file, get_transform(train=False))
-        test_loader = torch.utils.data.DataLoader(
-            test_dataset, batch_size=2, shuffle=False, num_workers=0, collate_fn=collate_fn
-        )
-        log_message(f"Test dataset loaded with {len(test_dataset)} images")
-    else:
-        log_message("Test dataset not available")
-
-    # Set up device
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    elif torch.backends.mps.is_available():
-        device = torch.device('mps')
-    else:
-        device = torch.device('cpu')
-    log_message(f"Using device: {device}")
-
-    # Get number of classes from training dataset
-    num_classes = len(train_dataset.coco.coco.getCatIds()) + 1  # +1 for background
-    log_message(f"Number of classes: {num_classes}")
-
+    Returns:
+        tuple: Contains the following elements:
+            - model (nn.Module): Initialized model (moved to device)
+            - optimizer (torch.optim.Optimizer): Model optimizer
+            - lr_scheduler (torch.optim.lr_scheduler._LRScheduler): Learning rate scheduler
+            - start_epoch (int): Epoch to start training from (0 if fresh start)
+            - best_val_loss (float): Best validation loss from previous training
+            - early_stopping_counter (int): Counter for early stopping logic
+    """
     # Initialize model
     log_message("Initializing model...")
     model = get_instance_segmentation_model(num_classes)
     model.to(device)
-    log_message("Model initialized and moved to device")
+    log_message(f"Model initialized and moved to device: {device}")
 
-    # Check if there are existing checkpoints to resume from
+    # Set default values
     start_epoch = 0
     best_val_loss = float('inf')
+    early_stopping_counter = 0
+    checkpoint = None
 
-    # Look for existing checkpoints in data_path/checkpoints
-    base_checkpoint_dir = os.path.join(data_path, "checkpoints")
-    if os.path.exists(base_checkpoint_dir):
-        checkpoint_dirs = [d for d in os.listdir(base_checkpoint_dir) 
-                            if os.path.isdir(os.path.join(base_checkpoint_dir, d))]
+    # Check for existing checkpoints
+    if base_checkpoint_dir is not None and os.path.exists(base_checkpoint_dir):
+        checkpoint_dirs = [d for d in os.listdir(base_checkpoint_dir)
+                          if os.path.isdir(os.path.join(base_checkpoint_dir, d))]
 
         if checkpoint_dirs:
             # Find the latest checkpoint directory
@@ -312,7 +397,7 @@ def main():
 
             # Find the latest checkpoint file
             checkpoints = [f for f in os.listdir(latest_checkpoint_dir) 
-                            if f.endswith('.pth') and f.startswith('mask_rcnn_checkpoint_epoch_')]
+                          if f.endswith('.pth') and f.startswith('mask_rcnn_checkpoint_epoch_')]
 
             if checkpoints:
                 latest_checkpoint = max(checkpoints, key=lambda x: int(x.split('_')[-1].split('.')[0]))
@@ -324,19 +409,20 @@ def main():
                     model.load_state_dict(checkpoint['model_state_dict'])
                     start_epoch = checkpoint['epoch']
                     best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-                    log_message(f"Resuming from epoch {start_epoch}")
+                    early_stopping_counter = checkpoint.get('early_stopping_counter', 0)
+                    log_message(f"Resuming from epoch {start_epoch} with early stopping counter {early_stopping_counter}")
                 except Exception as e:
                     log_message(f"Error loading checkpoint: {e}")
                     log_message("Starting training from scratch")
                     start_epoch = 0
-    
+
     # Set up optimizer and learning rate scheduler
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
     # Load optimizer and scheduler states if resuming
-    if start_epoch > 0:
+    if checkpoint is not None and start_epoch > 0:
         try:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -346,6 +432,205 @@ def main():
 
     log_message("Optimizer and learning rate scheduler initialized")
 
+    return model, optimizer, lr_scheduler, start_epoch, best_val_loss, early_stopping_counter
+
+
+def train_epoch(model, optimizer, train_loader, device, log_message, epoch_num=None, total_epochs=None):
+    """
+    Run a single training epoch
+
+    Args:
+        model (nn.Module): The model to train
+        optimizer (torch.optim.Optimizer): The optimizer to use
+        train_loader (DataLoader): DataLoader for training data
+        device (torch.device): Device to run model on
+        log_message (function): Function to log messages
+        epoch_num (int, optional): Current epoch number for logging
+        total_epochs (int, optional): Total number of epochs for logging
+
+    Returns:
+        float: Average training loss for the epoch
+    """
+    epoch_start_time = time.time()
+    model.train()
+    epoch_loss = 0
+    batch_count = 0
+
+    # Log epoch start if epoch number is provided
+    if epoch_num is not None and total_epochs is not None:
+        log_message(f"Epoch {epoch_num}/{total_epochs}")
+
+    # Training loop through batches
+    for i, (images, targets) in enumerate(train_loader):
+        # Move data to device
+        images = list(image.to(device) for image in images)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+        # Zero gradients, compute loss, backward pass, and optimization step
+        optimizer.zero_grad()
+        loss_dict = model(images, targets)
+        losses = sum(loss for loss in loss_dict.values())
+        losses.backward()
+        optimizer.step()
+
+        # Update running statistics
+        epoch_loss += losses.item()
+        batch_count += 1
+
+        # Log progress every 10 batches
+        if (i + 1) % 10 == 0:
+            log_message(f"  Batch {i+1}/{len(train_loader)}, Loss: {losses.item():.4f}")
+
+        # Clean up to free memory
+        del images, targets, loss_dict, losses
+
+    # Calculate and log average loss
+    avg_train_loss = epoch_loss / batch_count if batch_count > 0 else 0
+
+    # Log epoch summary if epoch number is provided
+    if epoch_num is not None:
+        log_message(f"  Epoch {epoch_num} training completed. Average Loss: {avg_train_loss:.4f}")
+        epoch_duration = time.time() - epoch_start_time
+        log_message(f"  Epoch duration: {epoch_duration:.2f} seconds")
+
+    return avg_train_loss
+
+
+def early_stopping_check(val_loss, best_val_loss, counter, patience, min_delta, log_message):
+    """
+    Check early stopping criteria and update counter
+
+    Args:
+        val_loss (float or None): Current validation loss (None if validation not performed)
+        best_val_loss (float): Best validation loss seen so far
+        counter (int): Current early stopping counter
+        patience (int): Maximum number of epochs to wait for improvement
+        min_delta (float): Minimum change to qualify as improvement
+        log_message (function): Function to log messages
+
+    Returns:
+        tuple: Contains the following elements:
+            - best_val_loss (float): Updated best validation loss
+            - counter (int): Updated early stopping counter
+            - should_stop (bool): Whether training should stop
+            - improved (bool): Whether validation loss improved
+    """
+    should_stop = False
+    improved = False
+
+    # Skip early stopping if no validation loss is available
+    if val_loss is None:
+        log_message("  Early stopping skipped: No validation loss available")
+        return best_val_loss, counter, should_stop, improved
+
+    # Check if we have significant improvement
+    if val_loss < best_val_loss - min_delta:
+        # Improvement found, reset counter
+        improved = True
+        best_val_loss = val_loss
+        counter = 0
+        log_message(f"  Validation loss improved to {val_loss:.4f}. Early stopping counter reset.")
+    else:
+        # No significant improvement
+        counter += 1
+        log_message(f"  No significant improvement. Early stopping counter: {counter}/{patience}")
+
+    # Check if we should stop training
+    if counter >= patience:
+        should_stop = True
+        log_message(f"  Early stopping triggered after {counter} epochs without improvement")
+
+    return best_val_loss, counter, should_stop, improved
+
+
+def save_checkpoint(model, optimizer, scheduler, checkpoint_dir, epoch, losses, counters, metadata=None, is_best=False):
+    """
+    Save model checkpoint
+
+    Args:
+        model (nn.Module): The model to save
+        optimizer (torch.optim.Optimizer): The optimizer to save
+        scheduler (torch.optim.lr_scheduler._LRScheduler): The scheduler to save
+        checkpoint_dir (str): Directory to save checkpoint in
+        epoch (int): Current epoch number
+        losses (dict): Dictionary containing loss values (e.g., {'train': 0.1, 'val': 0.2})
+        counters (dict): Dictionary containing counters (e.g., {'early_stopping': 2, 'num_classes': 5})
+        metadata (dict, optional): Additional metadata to save
+        is_best (bool, optional): Whether this is the best model so far
+
+    Returns:
+        str: Path to the saved checkpoint file
+    """
+    # Create the checkpoint dictionary
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+    }
+
+    # Add losses
+    if losses:
+        checkpoint.update(losses)
+
+    # Add counters
+    if counters:
+        checkpoint.update(counters)
+
+    # Add additional metadata
+    if metadata:
+        checkpoint.update(metadata)
+
+    # Regular checkpoint filename
+    checkpoint_filename = f'mask_rcnn_checkpoint_epoch_{epoch}.pth'
+    checkpoint_path = os.path.join(checkpoint_dir, checkpoint_filename)
+
+    # Save the checkpoint
+    torch.save(checkpoint, checkpoint_path)
+
+    # If this is the best model, also save it as the best model
+    if is_best:
+        best_model_path = os.path.join(checkpoint_dir, 'mask_rcnn_best_model.pth')
+        torch.save(checkpoint, best_model_path)
+        return best_model_path
+
+    return checkpoint_path
+
+
+def main():
+    # Set the path to your annotated images and annotations
+    data_path = "/Users/aja294/Documents/Grape_local/projects/vitivi_leaf_morphometrics/data/annotations/"
+    checkpoint_path = "/Users/aja294/Documents/Grape_local/projects/vitivi_leaf_morphometrics/models/mask_rcnn/"
+
+    # Setup paths and logging
+    train_dir, val_dir, train_annotations_file, val_annotations_file, checkpoint_dir, log_message, timestamp = setup_paths_and_logging(data_path, checkpoint_path)
+
+    # Load the datasets
+    log_message("Loading datasets...")
+
+    # Load datasets
+    train_loader, val_loader, num_classes = load_datasets(
+        train_dir, val_dir, train_annotations_file, val_annotations_file, log_message
+    )
+
+    # Set up device
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
+
+    # Set up model and optimization
+    base_checkpoint_dir = os.path.join(data_path, "checkpoints")
+    model, optimizer, lr_scheduler, start_epoch, best_val_loss, early_stopping_counter = setup_model_and_optimization(
+        num_classes, device, log_message, base_checkpoint_dir
+    )
+
+    # Initiate early stopping parameters, adjust these parameters to change the auto-stop functionality
+    early_stopping_patience = 3  # Number of epochs to wait for improvement
+    early_stopping_min_delta = 0.001  # Minimum change to qualify as improvement
+
     # Training parameters
     num_epochs = 5
     log_message(f"Starting training for {num_epochs} epochs")
@@ -353,129 +638,84 @@ def main():
 
     # Training loop
     for epoch in range(start_epoch, num_epochs):
-        epoch_start_time = time.time()
-        model.train()
-        epoch_loss = 0
-        batch_count = 0
-
-        log_message(f"Epoch {epoch+1}/{num_epochs}")
-
-        # Training phase
-        for i, (images, targets) in enumerate(train_loader):
-            images = list(image.to(device) for image in images)
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-            optimizer.zero_grad()
-            loss_dict = model(images, targets)
-            losses = sum(loss for loss in loss_dict.values())
-            losses.backward()
-            optimizer.step()
-
-            epoch_loss += losses.item()
-            batch_count += 1
-
-            if (i + 1) % 10 == 0:  # Print every 10 batches
-                log_message(f"  Batch {i+1}/{len(train_loader)}, Loss: {losses.item():.4f}")
-
-        # Print epoch training summary
-        avg_train_loss = epoch_loss / batch_count if batch_count > 0 else 0
-        log_message(f"  Epoch {epoch+1} training completed. Average Loss: {avg_train_loss:.4f}")
+        # Run training epoch
+        avg_train_loss = train_epoch(
+            model,
+            optimizer,
+            train_loader,
+            device,
+            log_message,
+            epoch_num=epoch+1,
+            total_epochs=num_epochs
+        )
 
         # Validation phase
         val_loss = None
         if val_loader:
             val_loss = evaluate_model(model, val_loader, device, log_message)
             log_message(f"  Validation Loss: {val_loss:.4f}")
-            
-        # Early stopping check
-        if val_loss is not None:
-            if val_loss < best_val_loss - early_stopping_min_delta:
-                # Improvement found, reset counter
-                early_stopping_counter = 0
-                best_val_loss = val_loss
-                # Save best model
-                best_model_path = os.path.join(checkpoint_dir, 'mask_rcnn_best_model.pth')
-                torch.save(checkpoint, best_model_path)
-                log_message(f"  New best model saved to {best_model_path} (val_loss: {best_val_loss:.4f})")
-            else:
-                # No improvement
-                early_stopping_counter += 1
-                log_message(f"  No improvement in validation loss. Early stopping counter: {early_stopping_counter}/{early_stopping_patience}")
-
-            # Check if early stopping criteria is met
-            if early_stopping_counter >= early_stopping_patience:
-                log_message(f"  Early stopping triggered after {epoch+1} epochs")
-                break
+        else:
+            log_message("WARNING: Validation dataset not available")
 
         # Update learning rate
         lr_scheduler.step()
         log_message(f"  Learning rate updated to: {optimizer.param_groups[0]['lr']:.6f}")
 
-        # Save checkpoint every epoch
-        checkpoint = {
-            'epoch': epoch + 1,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': lr_scheduler.state_dict(),
+        # Check early stopping criteria
+        best_val_loss, early_stopping_counter, should_stop, improved = early_stopping_check(
+            val_loss, 
+            best_val_loss,
+            early_stopping_counter,
+            early_stopping_patience,
+            early_stopping_min_delta,
+            log_message
+        )
+
+         # Prepare losses and counters for checkpoint
+        losses = {
             'train_loss': avg_train_loss,
             'val_loss': val_loss,
-            'best_val_loss': best_val_loss,
+            'best_val_loss': best_val_loss
+        }
+
+        counters = {
+            'early_stopping_counter': early_stopping_counter,
             'num_classes': num_classes
         }
 
-        checkpoint_path = os.path.join(checkpoint_dir, f'mask_rcnn_checkpoint_epoch_{epoch+1}.pth')
-        torch.save(checkpoint, checkpoint_path)
+        # Save checkpoint
+        checkpoint_path = save_checkpoint(
+            model,
+            optimizer,
+            lr_scheduler,
+            checkpoint_dir,
+            epoch + 1,
+            losses,
+            counters,
+            is_best=improved
+        )
         log_message(f"  Checkpoint saved to {checkpoint_path}")
 
-        # Save best model based on validation loss
-        if val_loss is not None and (epoch == start_epoch or val_loss < best_val_loss):
-            best_val_loss = val_loss
-            best_model_path = os.path.join(checkpoint_dir, 'mask_rcnn_best_model.pth')
-            torch.save(checkpoint, best_model_path)
-            log_message(f"  New best model saved to {best_model_path} (val_loss: {best_val_loss:.4f})")
+        # Break training loop if early stopping triggered
+        if should_stop:
+            log_message("Early stopping triggered. Halting training.")
+            break
 
-        # Calculate epoch duration
-        epoch_duration = time.time() - epoch_start_time
-        log_message(f"  Epoch duration: {epoch_duration:.2f} seconds")
-
-    log_message("Training completed!")
-
-    # Evaluate on test set if available
-    if test_loader:
-        log_message("Evaluating on test set...")
-        test_loss = evaluate_model(model, test_loader, device)
-        log_message(f"Test Loss: {test_loss:.4f}")
-
-      # Save the final model
+    # Save the final model
     final_model_path = os.path.join(checkpoint_dir, "maskrcnn_model_final.pth")
     torch.save({
         'model_state_dict': model.state_dict(),
         'num_classes': num_classes,
         'train_loss': avg_train_loss,
-        'val_loss': val_loss if val_loader else None,
-        'test_loss': test_loss if test_loader else None
+        'val_loss': val_loss if val_loader else None
     }, final_model_path)
     log_message(f"Final model saved to {final_model_path}")
 
-    # Create a symlink to the latest checkpoint directory
-    # Extract the base directory (without the checkpoints_timestamp part)
-    base_dir = os.path.dirname(checkpoint_dir)
-    latest_link = os.path.join(base_dir, "latest")
+    # Create symlink to latest checkpoint directory
+    create_symlink(checkpoint_dir, log_message)
 
-    # Check if the symlink already exists and remove it
-    if os.path.exists(latest_link):
-        try:
-            os.remove(latest_link)
-        except:
-            # On some systems, we might need to use unlink for symlinks
-            os.unlink(latest_link)
-
-    # Create the symlink pointing to the current checkpoint directory
-    try:
-        os.symlink(checkpoint_dir, latest_link)
-        log_message(f"Created symlink to latest checkpoint directory: {latest_link}")
-    except Exception as e:
-        log_message(f"Error creating symlink: {e}")
+    # Final message
+    log_message("Training completed!")
 
 if __name__ == "__main__":
     main()
