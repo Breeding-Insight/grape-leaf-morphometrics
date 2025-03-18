@@ -276,11 +276,13 @@ def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_fi
     train_dataset = LeafDataset(train_dir, train_annotations_file, get_transform(train=True))
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=16,
+        batch_size=96,
         shuffle=True,
-        num_workers=2,
+        num_workers=8,
         collate_fn=collate_fn,
         persistent_workers=True
+        pin_memory=True
+        prefetch_factor=3
     )
     log_message(f"Training dataset loaded with {len(train_dataset)} images")
 
@@ -295,10 +297,11 @@ def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_fi
         val_dataset = LeafDataset(val_dir, val_annotations_file, get_transform(train=False))
         val_loader = torch.utils.data.DataLoader(
             val_dataset, 
-            batch_size=2, 
+            batch_size=128, 
             shuffle=False, 
-            num_workers=0, 
+            num_workers=6, 
             collate_fn=collate_fn
+            pin_memory=True
         )
         log_message(f"Validation dataset loaded with {len(val_dataset)} images")
     else:
