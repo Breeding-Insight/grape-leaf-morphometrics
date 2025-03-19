@@ -14,6 +14,7 @@ Author: aja294@cornell.edu
 
 # Import standard libraries
 import os
+import gc
 import time
 from datetime import datetime
 import gc
@@ -21,11 +22,10 @@ import traceback
 
 # Import third-party libraries
 import numpy as np
-from PIL import Image
 import torch
 import torchvision
 import torchvision.transforms as T
-from pycocotools.coco import COCO
+from torch.amp import GradScaler, autocast
 
 # Import specific modules from torchvision
 import torch.multiprocessing as mp
@@ -276,14 +276,14 @@ def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_fi
     train_dataset = LeafDataset(train_dir, train_annotations_file, get_transform(train=True))
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=96,
+        batch_size=4,  # Increased from 2 to 4 for better GPU utilization
         shuffle=True,
-        num_workers=8,
+        num_workers=4,  # Increased to 4 for better I/O throughput
         collate_fn=collate_fn,
-        persistent_workers=True
-        pin_memory=True
-        prefetch_factor=3
-    )
+        pin_memory=True,  # Enables faster data transfer to CUDA
+        persistent_workers=True,
+        prefetch_factor=2
+        )
     log_message(f"Training dataset loaded with {len(train_dataset)} images")
 
     # Get number of classes from training dataset
@@ -296,12 +296,13 @@ def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_fi
     if os.path.exists(val_annotations_file):
         val_dataset = LeafDataset(val_dir, val_annotations_file, get_transform(train=False))
         val_loader = torch.utils.data.DataLoader(
-            val_dataset, 
-            batch_size=128, 
-            shuffle=False, 
-            num_workers=6, 
-            collate_fn=collate_fn
-            pin_memory=True
+            val_dataset,
+            batch_size=6,  # Slightly reduced from 8 for stability  
+            shuffle=False,
+            num_workers=2,  # Added 2 workers for validation
+            collate_fn=collate_fn,
+            pin_memory=True,  # Enables faster data transfer to CUDA
+            persistent_workers=True if len(val_dataset) > 20 else False  # Only use if dataset is large enough
         )
         log_message(f"Validation dataset loaded with {len(val_dataset)} images")
     else:
@@ -438,8 +439,9 @@ def setup_model_and_optimization(num_classes, device, log_message, base_checkpoi
     return model, optimizer, lr_scheduler, start_epoch, best_val_loss, early_stopping_counter
 
 
-def train_epoch(model, optimizer, train_loader, device, log_message, epoch_num=None, total_epochs=None):
+def train_epoch(model, optimizer, train_loader, device, log_message, scaler=None, epoch_num=None, total_epochs=None):
     """
+
     Run a single training epoch
 
     Args:
@@ -459,45 +461,54 @@ def train_epoch(model, optimizer, train_loader, device, log_message, epoch_num=N
     epoch_loss = 0
     batch_count = 0
 
-    # Log epoch start if epoch number is provided
     if epoch_num is not None and total_epochs is not None:
         log_message(f"Epoch {epoch_num}/{total_epochs}")
 
-    # Training loop through batches
     for i, (images, targets) in enumerate(train_loader):
         # Move data to device
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
-        # Zero gradients, compute loss, backward pass, and optimization step
+        # Zero gradients
         optimizer.zero_grad()
-        loss_dict = model(images, targets)
-        losses = sum(loss for loss in loss_dict.values())
-        losses.backward()
-        optimizer.step()
 
-        # Update running statistics
+        # Use mixed precision if on CUDA and scaler is provided
+        if device.type == 'cuda' and scaler is not None:
+            # Forward pass with autocast
+            with autocast('cuda'):
+                loss_dict = model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())
+
+            # Backward pass with scaling
+            scaler.scale(losses).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # Regular precision training
+            loss_dict = model(images, targets)
+            losses = sum(loss for loss in loss_dict.values())
+            losses.backward()
+            optimizer.step()
+
         epoch_loss += losses.item()
         batch_count += 1
 
-        # Log progress every 10 batches
         if (i + 1) % 10 == 0:
             log_message(f"  Batch {i+1}/{len(train_loader)}, Loss: {losses.item():.4f}")
 
-        # Clean up to free memory
+        # Clean up memory
         del images, targets, loss_dict, losses
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
 
-    # Calculate and log average loss
     avg_train_loss = epoch_loss / batch_count if batch_count > 0 else 0
 
-    # Log epoch summary if epoch number is provided
     if epoch_num is not None:
         log_message(f"  Epoch {epoch_num} training completed. Average Loss: {avg_train_loss:.4f}")
         epoch_duration = time.time() - epoch_start_time
         log_message(f"  Epoch duration: {epoch_duration:.2f} seconds")
 
     return avg_train_loss
-
 
 def early_stopping_check(val_loss, best_val_loss, counter, patience, min_delta, log_message):
     """
@@ -602,14 +613,11 @@ def save_checkpoint(model, optimizer, scheduler, checkpoint_dir, epoch, losses, 
 
 def main():
     # Set the path to your annotated images and annotations
-    data_path = "/Users/aja294/Documents/Grape_local/projects/vitivi_leaf_morphometrics/data/annotations/"
-    checkpoint_path = "/Users/aja294/Documents/Grape_local/projects/vitivi_leaf_morphometrics/models/mask_rcnn/"
+    data_path = "data/annotations"
+    checkpoint_path = "models/mask_rcnn"
 
     # Setup paths and logging
     train_dir, val_dir, train_annotations_file, val_annotations_file, checkpoint_dir, log_message, timestamp = setup_paths_and_logging(data_path, checkpoint_path)
-
-    # Load the datasets
-    log_message("Loading datasets...")
 
     # Load datasets
     train_loader, val_loader, num_classes = load_datasets(
@@ -623,6 +631,7 @@ def main():
         device = torch.device('mps')
     else:
         device = torch.device('cpu')
+    log_message(f"Using device: {device}")
 
     # Set up model and optimization
     base_checkpoint_dir = os.path.join(data_path, "checkpoints")
@@ -630,14 +639,16 @@ def main():
         num_classes, device, log_message, base_checkpoint_dir
     )
 
-    # Initiate early stopping parameters, adjust these parameters to change the auto-stop functionality
+    # Set up GradScaler for mixed precision training (for CUDA only)
+    scaler = GradScaler('cuda') if device.type == 'cuda' else None
+
+    # Initiate early stopping parameters
     early_stopping_patience = 3  # Number of epochs to wait for improvement
     early_stopping_min_delta = 0.001  # Minimum change to qualify as improvement
 
     # Training parameters
     num_epochs = 5
     log_message(f"Starting training for {num_epochs} epochs")
-    log_message(f"Using device: {device}")
 
     # Training loop
     for epoch in range(start_epoch, num_epochs):
@@ -648,6 +659,7 @@ def main():
             train_loader,
             device,
             log_message,
+            scaler=scaler,  # Pass the scaler
             epoch_num=epoch+1,
             total_epochs=num_epochs
         )
@@ -666,7 +678,7 @@ def main():
 
         # Check early stopping criteria
         best_val_loss, early_stopping_counter, should_stop, improved = early_stopping_check(
-            val_loss, 
+            val_loss,
             best_val_loss,
             early_stopping_counter,
             early_stopping_patience,
@@ -674,7 +686,7 @@ def main():
             log_message
         )
 
-         # Prepare losses and counters for checkpoint
+        # Prepare losses and counters for checkpoint
         losses = {
             'train_loss': avg_train_loss,
             'val_loss': val_loss,
@@ -716,6 +728,11 @@ def main():
 
     # Create symlink to latest checkpoint directory
     create_symlink(checkpoint_dir, log_message)
+
+    # Clean up
+    if device.type == 'cuda':
+        gc.collect()
+        torch.cuda.empty_cache()
 
     # Final message
     log_message("Training completed!")
