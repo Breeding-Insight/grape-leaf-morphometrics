@@ -22,11 +22,10 @@ import traceback
 
 # Import third-party libraries
 import numpy as np
-from PIL import Image
 import torch
 import torchvision
 import torchvision.transforms as T
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 
 # Import specific modules from torchvision
 import torch.multiprocessing as mp
@@ -476,7 +475,7 @@ def train_epoch(model, optimizer, train_loader, device, log_message, scaler=None
         # Use mixed precision if on CUDA and scaler is provided
         if device.type == 'cuda' and scaler is not None:
             # Forward pass with autocast
-            with autocast():
+            with autocast('cuda'):
                 loss_dict = model(images, targets)
                 losses = sum(loss for loss in loss_dict.values())
 
@@ -614,8 +613,8 @@ def save_checkpoint(model, optimizer, scheduler, checkpoint_dir, epoch, losses, 
 
 def main():
     # Set the path to your annotated images and annotations
-    data_path = "/Users/aja294/Documents/Grape_local/projects/vitivi_leaf_morphometrics/data/annotations/"
-    checkpoint_path = "/Users/aja294/Documents/Grape_local/projects/vitivi_leaf_morphometrics/models/mask_rcnn/"
+    data_path = "data/annotations"
+    checkpoint_path = "models/mask_rcnn"
 
     # Setup paths and logging
     train_dir, val_dir, train_annotations_file, val_annotations_file, checkpoint_dir, log_message, timestamp = setup_paths_and_logging(data_path, checkpoint_path)
@@ -641,7 +640,7 @@ def main():
     )
 
     # Set up GradScaler for mixed precision training (for CUDA only)
-    scaler = GradScaler() if device.type == 'cuda' else None
+    scaler = GradScaler('cuda') if device.type == 'cuda' else None
 
     # Initiate early stopping parameters
     early_stopping_patience = 3  # Number of epochs to wait for improvement
