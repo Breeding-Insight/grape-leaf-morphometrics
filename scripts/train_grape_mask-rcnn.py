@@ -27,7 +27,6 @@ import torch
 import torchvision
 import torchvision.transforms as T
 from torch.cuda.amp import GradScaler, autocast
-from pycocotools.coco import COCO
 
 # Import specific modules from torchvision
 import torch.multiprocessing as mp

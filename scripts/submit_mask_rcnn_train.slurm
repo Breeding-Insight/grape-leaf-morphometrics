@@ -2,12 +2,12 @@
 #SBATCH --job-name=mask_rcnn_train
 #SBATCH --output=mask_rcnn_%j.out
 #SBATCH --error=mask_rcnn_%j.err
-#SBATCH --time=72:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:RTX6000:1      # Updated to match your cluster's GPU specification
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=8
+#SBATCH --gres=gpu:RTX6000:1     
+#SBATCH --mem=32G
 #SBATCH --partition=regular
 
 # Email notifications
@@ -17,14 +17,12 @@
 
 # Activate conda environment
 source $HOME/.bashrc
-conda activate torch_nightly_cuda12.6-env  # Replace with your environment name
+conda activate torch_nightly_cuda12.6-env 
 
-# RTX 6000 Ada-specific optimizations
+# Basic GPU settings
 export CUDA_VISIBLE_DEVICES=0
-export CUDA_AUTO_BOOST=1
 export CUDA_CACHE_DISABLE=0
-export CUDA_CACHE_MAXSIZE=4294967296  # 4GB cache (increased for 49GB VRAM)
-export CUDA_DEVICE_MAX_CONNECTIONS=32  # Increased for Ada architecture
+export CUDA_CACHE_MAXSIZE=2147483648  # Increased for Ada architecture
 
 # Memory optimizations for 49GB VRAM
 export PYTORCH_CUDA_ALLOC_CONF="max_split_size_mb:1024,garbage_collection_threshold:0.8"
