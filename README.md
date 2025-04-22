@@ -67,7 +67,7 @@ The pipeline extracts the following leaf traits:
 
 ## Project Status
 
-Pipeline development in progress. This project builds upon existing work and data provided by Asmita Paudel (USDA) and is coordinated by Arlyn John Ackerman. Active code development is performed by Arlyn Ackerman and Meseret Wondifraw.
+Pipeline development in progress. This project builds upon existing work and data provided by Silvas Kirubakaran- Abiotic Stress Genetics Laboratory (USDA) and is coordinated by Arlyn John Ackerman. Active code development is performed by Arlyn Ackerman and Meseret Wondifraw.
 
 ## License
 
