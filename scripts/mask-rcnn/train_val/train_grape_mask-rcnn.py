@@ -120,8 +120,8 @@ def collate_fn(batch):
 
 ### Instance segmentation model
 def get_instance_segmentation_model(num_classes):
-    weights = torchvision.models.detection.MaskRCNN_ResNet50_FPN_Weights.DEFAULT
-    model = torchvision.models.detection.maskrcnn_resnet50_fpn(weights=weights)
+    weights = torchvision.models.detection.MaskRCNN_ResNet101_FPN_Weights.DEFAULT
+    model = torchvision.models.detection.maskrcnn_resnet101_fpn(weights=weights)
 
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
@@ -276,14 +276,14 @@ def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_fi
     train_dataset = LeafDataset(train_dir, train_annotations_file, get_transform(train=True))
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=4,  # Increased from 2 to 4 for better GPU utilization
+        batch_size=14,  # Increased for 128GB RAM
         shuffle=True,
-        num_workers=4,  # Increased to 4 for better I/O throughput
+        num_workers=8,  # Increased workers for better I/O throughput
         collate_fn=collate_fn,
-        pin_memory=True,  # Enables faster data transfer to CUDA
+        pin_memory=True,
         persistent_workers=True,
-        prefetch_factor=2
-        )
+        prefetch_factor=4  # Increased prefetching
+    )
     log_message(f"Training dataset loaded with {len(train_dataset)} images")
 
     # Get number of classes from training dataset
@@ -297,12 +297,12 @@ def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_fi
         val_dataset = LeafDataset(val_dir, val_annotations_file, get_transform(train=False))
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
-            batch_size=6,  # Slightly reduced from 8 for stability  
+            batch_size=18,  # Increased for 128GB RAM
             shuffle=False,
-            num_workers=2,  # Added 2 workers for validation
+            num_workers=6,  # Increased workers
             collate_fn=collate_fn,
-            pin_memory=True,  # Enables faster data transfer to CUDA
-            persistent_workers=True if len(val_dataset) > 20 else False  # Only use if dataset is large enough
+            pin_memory=True,
+            persistent_workers=True
         )
         log_message(f"Validation dataset loaded with {len(val_dataset)} images")
     else:
@@ -422,8 +422,16 @@ def setup_model_and_optimization(num_classes, device, log_message, base_checkpoi
 
     # Set up optimizer and learning rate scheduler
     params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
+    optimizer = torch.optim.SGD(params, 
+        lr=0.004,  # Adjusted for larger batch size
+        momentum=0.9,
+        weight_decay=0.0004  # Adjusted for ResNet101
+    )
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, 
+        step_size=3,  # Keep at 3 since we can process more data per epoch
+        gamma=0.1
+    )
 
     # Load optimizer and scheduler states if resuming
     if checkpoint is not None and start_epoch > 0:
@@ -613,8 +621,8 @@ def save_checkpoint(model, optimizer, scheduler, checkpoint_dir, epoch, losses, 
 
 def main():
     # Set the path to your annotated images and annotations
-    data_path = "data/annotations"
-    checkpoint_path = "models/mask_rcnn"
+    data_path = "/workdir/data/grape/grape_pheno/grape_peduncle/data/annotations"
+    checkpoint_path = "/workdir/data/grape/grape_pheno/grape_peduncle/checkpoints/maskrcnn/run_5.1"
 
     # Setup paths and logging
     train_dir, val_dir, train_annotations_file, val_annotations_file, checkpoint_dir, log_message, timestamp = setup_paths_and_logging(data_path, checkpoint_path)
@@ -634,7 +642,7 @@ def main():
     log_message(f"Using device: {device}")
 
     # Set up model and optimization
-    base_checkpoint_dir = os.path.join(data_path, "checkpoints")
+    base_checkpoint_dir = os.path.join(checkpoint_path, "checkpoints")
     model, optimizer, lr_scheduler, start_epoch, best_val_loss, early_stopping_counter = setup_model_and_optimization(
         num_classes, device, log_message, base_checkpoint_dir
     )
@@ -643,11 +651,11 @@ def main():
     scaler = GradScaler('cuda') if device.type == 'cuda' else None
 
     # Initiate early stopping parameters
-    early_stopping_patience = 3  # Number of epochs to wait for improvement
-    early_stopping_min_delta = 0.001  # Minimum change to qualify as improvement
+    early_stopping_patience = 4  # Increased from 3 to 4
+    early_stopping_min_delta = 0.0005  # Reduced from 0.001 for finer improvement detection
 
     # Training parameters
-    num_epochs = 5
+    num_epochs = 8  # Increased from 5 to 8 for better convergence
     log_message(f"Starting training for {num_epochs} epochs")
 
     # Training loop
@@ -659,7 +667,7 @@ def main():
             train_loader,
             device,
             log_message,
-            scaler=scaler,  # Pass the scaler
+            scaler=scaler,
             epoch_num=epoch+1,
             total_epochs=num_epochs
         )

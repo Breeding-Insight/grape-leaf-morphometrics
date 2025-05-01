@@ -32,10 +32,10 @@ def get_instance_segmentation_model(num_classes):
     # Use original architecture settings
     weights = torchvision.models.detection.MaskRCNN_ResNet50_FPN_Weights.DEFAULT
     model = torchvision.models.detection.maskrcnn_resnet50_fpn(weights=weights)
-    
+   
     in_features = model.roi_heads.box_predictor.cls_score.in_features
     model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
-    
+  
     # Keep original dimensions (256)
     in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
     hidden_layer = 256  
@@ -289,7 +289,7 @@ def evaluate(model, test_dataloader, device):
                 })
 
     print(f"\nTotal predictions: {len(results)}")
-    
+  
     if not results:
         print("No detections found!")
         return
