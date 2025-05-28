@@ -1,0 +1,66 @@
+# Instance segmentation configuration
+model_zoo_config: "COCO-InstanceSegmentation/mask_rcnn_X_101_32x8d_FPN_3x.yaml"
+
+output_dir: "checkpoints/detectron2/peduncle-segmentation"
+
+datasets:
+  train_json: "data/annotations/coco/train/_annotations.coco.json"
+  train_img_dir: "data/annotations/coco/train"
+  val_json: "data/annotations/coco/valid/_annotations.coco.json"
+  val_img_dir: "data/annotations/coco/valid"
+
+dataloader:
+  num_workers: 32
+
+solver:
+  ims_per_batch: 4          # Reduced batch size for higher resolution
+  base_lr: 0.00025          # Your original value is good for segmentation
+  warmup_iters: 500
+  max_iter: 3100
+  steps: [2000, 2800]
+  checkpoint_period: 500
+  warmup_factor: 0.001 
+
+roi_heads:
+  batch_size_per_image: 128
+  num_classes: 1
+  SCORE_THRESH_TEST: 0.7
+  NMS_THRESH_TEST: 0.5
+  DETECTIONS_PER_IMAGE: 3
+
+# Mask-specific configuration for precise edge contouring
+mask_head:
+  NUM_CONV: 4
+  POOLER_RESOLUTION: 28     # Higher resolution for fine details
+  POOLER_SAMPLING_RATIO: 2
+  LOSS_WEIGHT: 2.0          # Emphasize mask quality
+
+# Anchor configuration based on peduncle dataset analysis
+model:
+  anchor_generator:
+    sizes: [[130], [225], [305], [419], [547]]
+    aspect_ratios: [[0.23, 0.68, 1.13, 2.22, 3.14]]
+  # FPN levels - consider specifying to focus on appropriate scales
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+
+# Input size configuration - higher resolution for better segmentation
+INPUT:
+  MIN_SIZE_TRAIN: (800, 1024, 1280)
+  MAX_SIZE_TRAIN: 1600
+  MIN_SIZE_TEST: 1600
+  MAX_SIZE_TEST: 1600
+
+# Data augmentation with segmentation-friendly options
+augmentation:
+  random_flip: "horizontal"
+  brightness: 0.8
+  contrast: 0.8
+  saturation: 0.8
+  hue: 0.1
+  # Avoid geometric augmentations that could distort mask shapes severely
+
+# Optional logging section for GPU monitoring during training
+logging:
+  gpu_monitoring: true
+  monitor_interval_sec: 10  
