@@ -35,7 +35,7 @@ mask_head:
   POOLER_SAMPLING_RATIO: 2
   LOSS_WEIGHT: 2.0          # Emphasize mask quality
 
-# Anchor configuration based on peduncle dataset analysis
+# Anchor configuration based on leaf dataset analysis
 model:
   anchor_generator:
     sizes: [[257], [1139], [2056], [3183], [4475]]
