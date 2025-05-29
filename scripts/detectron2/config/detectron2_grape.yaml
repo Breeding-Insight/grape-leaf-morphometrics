@@ -38,8 +38,8 @@ mask_head:
 # Anchor configuration based on peduncle dataset analysis
 model:
   anchor_generator:
-    sizes: [[130], [225], [305], [419], [547]]
-    aspect_ratios: [[0.23, 0.68, 1.13, 2.22, 3.14]]
+    sizes: [[257], [1139], [2056], [3183], [4475]]
+    aspect_ratios: [[0.76, 0.85, 0.94, 1.01, 1.13]]
   # FPN levels - consider specifying to focus on appropriate scales
   FPN:
     IN_FEATURES: ["res2", "res3", "res4", "res5"]
