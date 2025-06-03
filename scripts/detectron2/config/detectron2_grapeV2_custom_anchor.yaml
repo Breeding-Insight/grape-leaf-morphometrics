@@ -1,0 +1,81 @@
+# Enhanced Detectron2 configuration for grape peduncle segmentation
+# Optimized for ResNeXt-101 backbone and custom large anchor sizes
+
+model_zoo_config: "COCO-Detection/cascade_rcnn_X_101_32x8d_FPN_3x.yaml"
+
+output_dir: "checkpoints/detectron2/grape_peduncle_v2"
+
+datasets:
+  train_json: "data/annotations/coco/train/_annotations.coco.json"
+  train_img_dir: "data/annotations/coco/train"
+  val_json: "data/annotations/coco/valid/_annotations.coco.json"
+  val_img_dir: "data/annotations/coco/valid"
+
+dataloader:
+  num_workers: 12  # Increased for ResNeXt-101's higher computational load
+
+solver:
+  ims_per_batch: 1  # Further reduced due to large anchors and ResNeXt-101 memory requirements
+  base_lr: 0.0002  # Further reduced for stability with large anchors
+  max_iter: 15000  # Increased for better convergence with complex setup
+  steps: [10000, 13000]  # Adjusted LR decay schedule
+  checkpoint_period: 1000
+  warmup_iters: 1000  # Increased warmup for stability
+  weight_decay: 0.0001
+
+roi_heads:
+  batch_size_per_image: 256  # Reduced due to large anchor complexity
+  num_classes: 1  # Single class for peduncles
+  SCORE_THRESH_TEST: 0.3
+  NMS_THRESH_TEST: 0.5
+  DETECTIONS_PER_IMAGE: 50
+
+# Model architecture optimizations
+model:
+  anchor_generator:
+    sizes: [[257], [1139], [2056], [3183], [4475]]
+    aspect_ratios: [[0.76, 0.85, 0.94, 1.01, 1.13]]
+
+# RPN configuration for large anchors
+rpn:
+  PRE_NMS_TOPK_TRAIN: 6000  # Reduced due to computational complexity
+  PRE_NMS_TOPK_TEST: 3000
+  POST_NMS_TOPK_TRAIN: 1000
+  POST_NMS_TOPK_TEST: 500
+  NMS_THRESH: 0.7
+  POSITIVE_FRACTION: 0.5
+  BATCH_SIZE_PER_IMAGE: 256
+
+# Input preprocessing - CRITICAL: Increased for large anchors
+INPUT:
+  MIN_SIZE_TRAIN: [1200, 1600]  # Significantly increased to accommodate large anchors
+  MAX_SIZE_TRAIN: 2400  # Increased maximum size
+  MIN_SIZE_TEST: 1600   # Increased test size
+  MAX_SIZE_TEST: 2400   # Increased test maximum
+
+# FPN configuration for large anchor handling
+fpn:
+  IN_FEATURES: ["res3", "res4", "res5"]
+  OUT_CHANNELS: 256
+  NORM: ""
+  TOP_BLOCK: LastLevelMaxPool  # Add P6 level for very large objects
+
+# Mask head configuration
+mask_head:
+  NUM_CONV: 4
+  POOLER_RESOLUTION: 14
+  POOLER_SAMPLING_RATIO: 2
+  LOSS_WEIGHT: 1.0
+
+# Data augmentation - adjusted for larger images
+augmentation:
+  random_flip: "horizontal"
+  brightness: [0.95, 1.05]  # Reduced range for stability
+  contrast: [0.95, 1.05]
+  saturation: [0.95, 1.05]
+
+# Logging configuration
+logging:
+  gpu_monitoring: true
+  monitor_interval_sec: 10
+  eval_period: 1000

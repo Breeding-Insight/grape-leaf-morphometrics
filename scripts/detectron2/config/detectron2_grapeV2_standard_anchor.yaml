@@ -1,0 +1,64 @@
+# Enhanced Detectron2 configuration for grape peduncle segmentation
+# Optimized for ResNeXt-101 backbone and training stability
+
+model_zoo_config: "COCO-Detection/cascade_rcnn_X_101_32x8d_FPN_3x.yaml"
+
+output_dir: "checkpoints/detectron2/grape_peduncle_v2"
+
+datasets:
+  train_json: "data/annotations/coco/train/_annotations.coco.json"
+  train_img_dir: "data/annotations/coco/train"
+  val_json: "data/annotations/coco/valid/_annotations.coco.json"
+  val_img_dir: "data/annotations/coco/valid"
+
+dataloader:
+  num_workers: 12  # Increased for ResNeXt-101's higher computational load
+
+solver:
+  ims_per_batch: 2  # Reduced for ResNeXt-101's higher memory requirements
+  base_lr: 0.0005  # Reduced learning rate for larger, more complex model
+  max_iter: 12000  # Increased iterations for better convergence with ResNeXt-101
+  steps: [8000, 10500]  # Adjusted LR decay schedule for longer training
+  checkpoint_period: 1000  # Less frequent checkpoints due to longer training
+  warmup_iters: 500  # Increased warmup for stable training with complex model
+  weight_decay: 0.0001
+
+roi_heads:
+  batch_size_per_image: 512  # Increased for better sampling with larger model
+  num_classes: 1  # Single class for peduncles
+  SCORE_THRESH_TEST: 0.3  # Lower threshold for better recall
+  NMS_THRESH_TEST: 0.5
+  DETECTIONS_PER_IMAGE: 50  # Reasonable number of detections
+
+# Model architecture optimizations
+model:
+  anchor_generator:
+    sizes: [[32], [64], [128], [256], [512]]  # Standard anchor sizes
+    aspect_ratios: [[0.5, 1.0, 2.0]]  # Standard aspect ratios
+
+# Input preprocessing
+INPUT:
+  MIN_SIZE_TRAIN: [640, 800]  # Multi-scale training
+  MAX_SIZE_TRAIN: 1333
+  MIN_SIZE_TEST: 800
+  MAX_SIZE_TEST: 1333
+
+# Mask head configuration
+mask_head:
+  NUM_CONV: 4
+  POOLER_RESOLUTION: 14
+  POOLER_SAMPLING_RATIO: 2
+  LOSS_WEIGHT: 1.0
+
+# Data augmentation
+augmentation:
+  random_flip: "horizontal"
+  brightness: [0.9, 1.1]
+  contrast: [0.9, 1.1]
+  saturation: [0.9, 1.1]
+
+# Logging configuration
+logging:
+  gpu_monitoring: true
+  monitor_interval_sec: 10
+  eval_period: 1000  # Evaluate every 1000 iterations for longer training
