@@ -689,9 +689,12 @@ def evaluate_model_mAP(model, data_loader, device, dataset, log_message=print):
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
         
-        # Extract mAP values
-        bbox_mAP = coco_evaluator.coco_eval['bbox'].stats[0]  # mAP @ IoU=0.50:0.95
-        segm_mAP = coco_evaluator.coco_eval['segm'].stats[0]  # mAP @ IoU=0.50:0.95
+        # FIXED: Extract mAP values using correct integer-based indexing.
+        # The .stats attribute is a list, not a dictionary.
+        # coco_evaluator.coco_eval['bbox'] is the COCOeval object for bounding boxes.
+        # .stats[0] is the mAP @ IoU=0.50:0.95.
+        bbox_mAP = coco_evaluator.coco_eval['bbox'].stats[0]
+        segm_mAP = coco_evaluator.coco_eval['segm'].stats[0]
         
         # Calculate average loss (handle case where all loss calculations failed)
         if batch_count > 0 and total_loss != float('inf') * batch_count:
@@ -711,7 +714,7 @@ def evaluate_model_mAP(model, data_loader, device, dataset, log_message=print):
         log_message(f"Error during mAP evaluation: {e}")
         traceback.print_exc()
         log_message("  Falling back to loss-only evaluation")
-        return evaluate_model_loss_only(model, data_loader, device, log_message)
+        return None, None, float('inf')
 
 def evaluate_model_loss_only(model, data_loader, device, log_message=print):
     """
@@ -829,6 +832,12 @@ def evaluate_model_robust(model, data_loader, device, dataset=None, log_message=
         log_message("  Using mAP-based evaluation with loss calculation")
         segm_mAP, bbox_mAP, val_loss = evaluate_model_mAP(model, data_loader, device, dataset, log_message)
         evaluation_mode = "mAP_with_loss"
+        
+        # If mAP evaluation failed, fall back to loss-only evaluation
+        if segm_mAP is None:
+            log_message("  mAP evaluation failed. Switching to loss-only evaluation.")
+            _, _, val_loss = evaluate_model_loss_only(model, data_loader, device, log_message)
+            evaluation_mode = "loss_only_fallback"
     else:
         if use_mAP:
             log_message("  mAP evaluation requested but not available, falling back to loss-only")
