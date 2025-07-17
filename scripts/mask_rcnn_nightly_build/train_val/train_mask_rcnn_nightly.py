@@ -36,7 +36,7 @@ from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.models.detection import MaskRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import RoIAlign
-from torchvision.models import resnext101_32x8d
+from torchvision.models import resnext101_32x8d, ResNeXt101_32X8D_Weights
 
 # Import COCO utilities
 from .coco_utils import get_coco_api_from_dataset, CocoEvaluator, COCO_EVAL_AVAILABLE
@@ -61,9 +61,10 @@ class ResNeXtFPN(nn.Module):
     def __init__(self, pretrained=True, trainable_layers=3):
         super().__init__()
         
-        # Load pretrained ResNeXt-101 32x8d
-        print(f"Loading pretrained ResNeXt-101 32x8d (trainable_layers={trainable_layers})")
-        backbone = resnext101_32x8d(pretrained=pretrained)
+        # Load pretrained ResNeXt-101 32x8d using the new 'weights' API
+        print(f"Loading ResNeXt-101 32x8d with pretrained weights (trainable_layers={trainable_layers})")
+        weights = ResNeXt101_32X8D_Weights.DEFAULT if pretrained else None
+        backbone = resnext101_32x8d(weights=weights)
         
         # Extract layers for FPN
         self.conv1 = backbone.conv1
@@ -99,7 +100,7 @@ class ResNeXtFPN(nn.Module):
         self._init_fpn_weights()
         
         print("ResNeXt-101 32x8d FPN initialized:")
-        print(f"  - Pretrained backbone: {pretrained}")
+        print(f"  - Pretrained weights: {'DEFAULT' if pretrained else 'None'}")
         print(f"  - Trainable layers: {trainable_layers}")
         print(f"  - Backbone architecture: ResNeXt-101 32x8d (groups=32, width_per_group=8)")
         
@@ -399,7 +400,7 @@ class LeafDataset(torch.utils.data.Dataset):
         target['iscrowd'] = iscrowd
 
         if self.transforms is not None:
-            img = self.transforms(img)
+            img, target = self.transforms(img, target)
 
         return img, target
 
@@ -411,7 +412,7 @@ def get_transform(train):
     transforms = []
     
     if USE_V2_TRANSFORMS:
-        transforms.append(T_v2.ToPureTensor())
+        transforms.append(T_v2.ToImage())
         
         if train:
             # Enhanced augmentation pipeline optimized for ResNeXt
@@ -426,6 +427,8 @@ def get_transform(train):
                 T_v2.RandomApply([T_v2.RandomAdjustSharpness(sharpness_factor=2)], p=0.1),
             ])
         
+        transforms.append(T_v2.ToDtype(torch.float32, scale=True))
+
         return T_v2.Compose(transforms)
     else:
         transforms.append(T.ToTensor())
