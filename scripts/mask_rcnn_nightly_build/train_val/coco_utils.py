@@ -1,4 +1,3 @@
-
 import copy
 from collections import defaultdict
 import torch
@@ -19,9 +18,20 @@ def get_coco_api_from_dataset(dataset):
     """
     Get COCO API instance from a torch.utils.data.Dataset object.
     This is a standard utility function from torchvision's detection references.
+    
+    FIXED: This function now correctly extracts the pycocotools.coco.COCO
+    object, which is nested inside the torchvision.datasets.CocoDetection
+    object. The original implementation was returning the CocoDetection object
+    itself, causing an AttributeError during evaluation.
     """
+    # The LeafDataset stores the CocoDetection object in its 'coco' attribute.
+    # The CocoDetection object, in turn, stores the actual COCO API object
+    # in its own 'coco' attribute.
+    if hasattr(dataset, 'coco') and hasattr(dataset.coco, 'coco'):
+        return dataset.coco.coco
+    
     if hasattr(dataset, 'coco'):
-        return dataset.coco
+        return dataset.coco # Fallback for other dataset structures
     
     # Fallback for datasets that don't have a 'coco' attribute
     # This might require custom adaptation based on the dataset structure
