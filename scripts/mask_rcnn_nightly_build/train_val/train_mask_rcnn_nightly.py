@@ -411,7 +411,7 @@ def get_transform(train):
     transforms = []
     
     if USE_V2_TRANSFORMS:
-        transforms.append(T_v2.ToImageTensor())
+        transforms.append(T_v2.ToPureTensor())
         
         if train:
             # Enhanced augmentation pipeline optimized for ResNeXt
