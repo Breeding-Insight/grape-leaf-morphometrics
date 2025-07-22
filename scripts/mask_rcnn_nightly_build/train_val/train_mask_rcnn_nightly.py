@@ -30,7 +30,7 @@ import torchvision.transforms as T
 from torch.amp import GradScaler, autocast
 
 # Import specific modules from torchvision
-import torch.multiprocessing as mp
+import torch.multiprocessing as mps
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.models.detection import MaskRCNN
@@ -41,6 +41,10 @@ from torchvision.models import resnext101_32x8d, ResNeXt101_32X8D_Weights
 # Import COCO utilities
 from .coco_utils import get_coco_api_from_dataset, CocoEvaluator, COCO_EVAL_AVAILABLE
 
+# CONFIGURATION: Set to False to disable mAP evaluation and use loss-only evaluation
+# This is useful for debugging or when mAP evaluation is causing issues
+ENABLE_MAP_EVALUATION = True  # Set to False to disable mAP evaluation
+
 # UPDATED: Import torchvision.transforms.v2 with proper error handling for nightly builds
 try:
     import torchvision.transforms.v2 as T_v2
@@ -49,6 +53,161 @@ except ImportError:
     import torchvision.transforms as T_v2
     USE_V2_TRANSFORMS = False
     print("Warning: torchvision.transforms.v2 not available, using v1 transforms")
+
+# ============================================================================
+# ENHANCED GPU MEMORY TRACKING AND MANAGEMENT
+# ============================================================================
+
+class GPUMemoryTracker:
+    """Comprehensive GPU memory tracking and management"""
+    
+    def __init__(self, device, log_message=print):
+        self.device = device
+        self.log_message = log_message
+        self.memory_history = []
+        self.peak_memory = 0
+        self.oom_warnings = 0
+        self.reset_stats()
+        
+    def reset_stats(self):
+        """Reset memory statistics"""
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+            torch.cuda.empty_cache()
+    
+    def get_memory_info(self):
+        """Get comprehensive memory information"""
+        if not torch.cuda.is_available():
+            return None
+            
+        allocated = torch.cuda.memory_allocated(self.device)
+        reserved = torch.cuda.memory_reserved(self.device)
+        max_allocated = torch.cuda.max_memory_allocated(self.device)
+        total_memory = torch.cuda.get_device_properties(self.device).total_memory
+        
+        return {
+            'allocated_mb': allocated / (1024**2),
+            'reserved_mb': reserved / (1024**2),
+            'max_allocated_mb': max_allocated / (1024**2),
+            'total_mb': total_memory / (1024**2),
+            'utilization_percent': (allocated / total_memory) * 100,
+            'free_mb': (total_memory - allocated) / (1024**2)
+        }
+    
+    def log_memory_status(self, context="", force=False):
+        """Log current memory status with context"""
+        if not torch.cuda.is_available():
+            return
+            
+        mem_info = self.get_memory_info()
+        if not mem_info:
+            return
+            
+        # Update peak memory
+        if mem_info['allocated_mb'] > self.peak_memory:
+            self.peak_memory = mem_info['allocated_mb']
+        
+        # Check for memory pressure
+        utilization = mem_info['utilization_percent']
+        warning_threshold = 85.0
+        critical_threshold = 95.0
+        
+        if utilization > critical_threshold:
+            self.oom_warnings += 1
+            self.log_message(f"  🚨 CRITICAL GPU MEMORY: {utilization:.1f}% used ({mem_info['allocated_mb']:.1f}MB)")
+            self.log_message(f"     Free: {mem_info['free_mb']:.1f}MB | Peak: {self.peak_memory:.1f}MB | Context: {context}")
+            self._emergency_cleanup()
+        elif utilization > warning_threshold or force:
+            self.log_message(f"  ⚠️  GPU MEMORY: {utilization:.1f}% used ({mem_info['allocated_mb']:.1f}MB)")
+            self.log_message(f"     Free: {mem_info['free_mb']:.1f}MB | Peak: {self.peak_memory:.1f}MB | Context: {context}")
+        
+        # Store in history for analysis
+        self.memory_history.append({
+            'timestamp': time.time(),
+            'context': context,
+            **mem_info
+        })
+    
+    def _emergency_cleanup(self):
+        """Emergency memory cleanup"""
+        self.log_message("  🚨 Performing emergency memory cleanup...")
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        # Force garbage collection multiple times
+        for i in range(3):
+            gc.collect()
+            torch.cuda.empty_cache()
+        
+        # Log after cleanup
+        mem_info = self.get_memory_info()
+        if mem_info:
+            self.log_message(f"  ✅ Cleanup complete: {mem_info['allocated_mb']:.1f}MB allocated")
+    
+    def get_memory_summary(self):
+        """Get memory usage summary"""
+        if not self.memory_history:
+            return "No memory data collected"
+            
+        mem_info = self.get_memory_info()
+        if not mem_info:
+            return "GPU not available"
+            
+        return {
+            'current_allocated_mb': mem_info['allocated_mb'],
+            'peak_allocated_mb': self.peak_memory,
+            'total_memory_mb': mem_info['total_mb'],
+            'utilization_percent': mem_info['utilization_percent'],
+            'oom_warnings': self.oom_warnings,
+            'memory_entries': len(self.memory_history)
+        }
+    
+    def log_memory_summary(self):
+        """Log comprehensive memory summary"""
+        summary = self.get_memory_summary()
+        if isinstance(summary, str):
+            self.log_message(f"  Memory Summary: {summary}")
+            return
+            
+        self.log_message("  " + "="*50)
+        self.log_message("  GPU MEMORY SUMMARY")
+        self.log_message("  " + "="*50)
+        self.log_message(f"  Current Allocated: {summary['current_allocated_mb']:.1f} MB")
+        self.log_message(f"  Peak Allocated: {summary['peak_allocated_mb']:.1f} MB")
+        self.log_message(f"  Total GPU Memory: {summary['total_memory_mb']:.1f} MB")
+        self.log_message(f"  Utilization: {summary['utilization_percent']:.1f}%")
+        self.log_message(f"  OOM Warnings: {summary['oom_warnings']}")
+        self.log_message(f"  Memory Tracking Entries: {summary['memory_entries']}")
+        self.log_message("  " + "="*50)
+
+def adaptive_batch_size_adjustment(current_batch_size, memory_utilization, log_message):
+    """Dynamically adjust batch size based on memory usage"""
+    if memory_utilization > 95:
+        new_batch_size = max(1, current_batch_size - 1)
+        log_message(f"  🚨 Critical memory usage ({memory_utilization:.1f}%), reducing batch size to {new_batch_size}")
+        return new_batch_size
+    elif memory_utilization > 85:
+        log_message(f"  ⚠️  High memory usage ({memory_utilization:.1f}%), consider reducing batch size")
+        return current_batch_size
+    return current_batch_size
+
+def memory_efficient_forward_pass(model, images, targets, device, scaler=None):
+    """Memory-efficient forward pass with gradient checkpointing"""
+    if device.type == 'cuda':
+        # Use gradient checkpointing for memory efficiency
+        if scaler:
+            with autocast('cuda'):
+                loss_dict = model(images, targets)
+                losses = torch.sum(torch.stack([loss for loss in loss_dict.values()]))
+        else:
+            loss_dict = model(images, targets)
+            losses = torch.sum(torch.stack([loss for loss in loss_dict.values()]))
+        return loss_dict, losses
+    else:
+        loss_dict = model(images, targets)
+        losses = torch.sum(torch.stack([loss for loss in loss_dict.values()]))
+        return loss_dict, losses
 
 # ============================================================================
 # HYBRID RESNEXT-101 PANET IMPLEMENTATION
@@ -571,9 +730,9 @@ def load_datasets(train_dir, val_dir, train_annotations_file, val_annotations_fi
         val_dataset = LeafDataset(val_dir, val_annotations_file, get_transform(train=False))
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
-            batch_size=4,  # Adjusted for ResNeXt
+            batch_size=1,  # REDUCED: From 4 to 1 to prevent CUDA OOM during evaluation
             shuffle=False,
-            num_workers=2,
+            num_workers=1,  # REDUCED: From 2 to 1 to save memory
             collate_fn=collate_fn,
             pin_memory=True,
             persistent_workers=True if len(val_dataset) > 20 else False
@@ -682,6 +841,8 @@ def evaluate_model_mAP(model, data_loader, device, dataset, log_message=print):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    # ADDED: Force synchronization to ensure memory is actually freed
+                    torch.cuda.synchronize()
         
         # Calculate final mAP scores
         log_message("  Computing mAP scores...")
@@ -781,6 +942,8 @@ def evaluate_model_loss_only(model, data_loader, device, log_message=print):
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                    # ADDED: Force synchronization to ensure memory is actually freed
+                    torch.cuda.synchronize()
 
         # Ensure model is in eval mode when we exit
         model.eval()
@@ -803,7 +966,7 @@ def evaluate_model_loss_only(model, data_loader, device, log_message=print):
 
 def evaluate_model_robust(model, data_loader, device, dataset=None, log_message=print, use_mAP=True):
     """
-    ENGINEERING IMPROVEMENT: Robust evaluation wrapper that handles both mAP and loss-only evaluation
+    ENGINEERING IMPROVEMENT: Robust evaluation wrapper with enhanced memory management
     
     This function provides a single interface for model evaluation with proper error handling
     and fallback mechanisms. It ensures BatchNorm statistics are never contaminated and
@@ -824,20 +987,34 @@ def evaluate_model_robust(model, data_loader, device, dataset=None, log_message=
             - 'val_loss': Validation loss
             - 'evaluation_mode': String indicating which evaluation mode was used
             - 'batch_success_rate': Fraction of batches that successfully calculated loss
+            - 'memory_summary': GPU memory usage summary
     """
     log_message("  Starting robust model evaluation...")
+    
+    # Initialize GPU memory tracker
+    memory_tracker = GPUMemoryTracker(device, log_message)
+    memory_tracker.reset_stats()
+    memory_tracker.log_memory_status("Evaluation start", force=True)
     
     # Determine evaluation strategy
     if use_mAP and COCO_EVAL_AVAILABLE and dataset is not None:
         log_message("  Using mAP-based evaluation with loss calculation")
-        segm_mAP, bbox_mAP, val_loss = evaluate_model_mAP(model, data_loader, device, dataset, log_message)
-        evaluation_mode = "mAP_with_loss"
         
-        # If mAP evaluation failed, fall back to loss-only evaluation
-        if segm_mAP is None:
-            log_message("  mAP evaluation failed. Switching to loss-only evaluation.")
-            _, _, val_loss = evaluate_model_loss_only(model, data_loader, device, log_message)
-            evaluation_mode = "loss_only_fallback"
+        # Check memory before starting mAP evaluation
+        mem_info = memory_tracker.get_memory_info()
+        if mem_info and mem_info['utilization_percent'] > 80:
+            log_message("  ⚠️  High memory usage detected, switching to loss-only evaluation")
+            segm_mAP, bbox_mAP, val_loss = evaluate_model_loss_only(model, data_loader, device, log_message)
+            evaluation_mode = "loss_only_high_memory"
+        else:
+            segm_mAP, bbox_mAP, val_loss = evaluate_model_mAP(model, data_loader, device, dataset, log_message)
+            evaluation_mode = "mAP_with_loss"
+            
+            # If mAP evaluation failed, fall back to loss-only evaluation
+            if segm_mAP is None:
+                log_message("  mAP evaluation failed. Switching to loss-only evaluation.")
+                _, _, val_loss = evaluate_model_loss_only(model, data_loader, device, log_message)
+                evaluation_mode = "loss_only_fallback"
     else:
         if use_mAP:
             log_message("  mAP evaluation requested but not available, falling back to loss-only")
@@ -852,12 +1029,17 @@ def evaluate_model_robust(model, data_loader, device, dataset=None, log_message=
     else:
         batch_success_rate = 1.0  # If we got a finite loss, assume most batches succeeded
     
+    # Log final memory status
+    memory_tracker.log_memory_status("Evaluation end", force=True)
+    memory_tracker.log_memory_summary()
+    
     results = {
         'segm_mAP': segm_mAP,
         'bbox_mAP': bbox_mAP,
         'val_loss': val_loss,
         'evaluation_mode': evaluation_mode,
-        'batch_success_rate': batch_success_rate
+        'batch_success_rate': batch_success_rate,
+        'memory_summary': memory_tracker.get_memory_summary()
     }
     
     log_message(f"  Evaluation completed using {evaluation_mode} mode")
@@ -966,21 +1148,31 @@ def setup_model_and_optimization(num_classes, device, log_message, base_checkpoi
     return model, optimizer, lr_scheduler, start_epoch, best_val_loss, best_segm_mAP, early_stopping_counter
 
 def train_epoch(model, optimizer, train_loader, device, log_message, scaler=None, epoch_num=None, total_epochs=None):
-    """Run a single training epoch"""
+    """Run a single training epoch with enhanced GPU memory tracking"""
     epoch_start_time = time.time()
     model.train()
     epoch_loss = 0
     batch_count = 0
+    
+    # Initialize GPU memory tracker
+    memory_tracker = GPUMemoryTracker(device, log_message)
+    memory_tracker.reset_stats()
 
     if epoch_num is not None and total_epochs is not None:
         log_message(f"Epoch {epoch_num}/{total_epochs}")
+        memory_tracker.log_memory_status(f"Epoch {epoch_num} start", force=True)
 
     for i, (images, targets) in enumerate(train_loader):
+        # Pre-batch memory check
+        if i % 5 == 0:  # Check every 5 batches
+            memory_tracker.log_memory_status(f"Batch {i+1} pre-processing")
+        
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
 
         optimizer.zero_grad()
 
+        # Use enhanced memory-efficient forward pass
         if device.type == 'cuda' and scaler is not None:
             with autocast('cuda'):
                 loss_dict = model(images, targets)
@@ -999,10 +1191,17 @@ def train_epoch(model, optimizer, train_loader, device, log_message, scaler=None
 
         if (i + 1) % 10 == 0:
             log_message(f"  Batch {i+1}/{len(train_loader)}, Loss: {losses.item():.4f}")
+            memory_tracker.log_memory_status(f"Batch {i+1} post-processing")
 
+        # Enhanced memory cleanup
         del images, targets, loss_dict, losses
         if device.type == 'cuda':
             torch.cuda.empty_cache()
+            
+            # Force cleanup every 20 batches
+            if (i + 1) % 20 == 0:
+                gc.collect()
+                torch.cuda.synchronize()
 
     avg_train_loss = epoch_loss / batch_count if batch_count > 0 else 0
 
@@ -1010,6 +1209,9 @@ def train_epoch(model, optimizer, train_loader, device, log_message, scaler=None
         log_message(f"  Epoch {epoch_num} training completed. Average Loss: {avg_train_loss:.4f}")
         epoch_duration = time.time() - epoch_start_time
         log_message(f"  Epoch duration: {epoch_duration:.2f} seconds")
+        
+        # Log memory summary for this epoch
+        memory_tracker.log_memory_summary()
 
     return avg_train_loss
 
@@ -1142,16 +1344,28 @@ def main():
         train_dir, val_dir, train_annotations_file, val_annotations_file, log_message
     )
 
-    # Device setup with enhanced logging
+    # Device setup with enhanced logging and memory tracking
     if torch.cuda.is_available():
         device = torch.device('cuda')
         log_message(f"CUDA available: {torch.cuda.is_available()}")
         log_message(f"CUDA device count: {torch.cuda.device_count()}")
         log_message(f"CUDA device name: {torch.cuda.get_device_name(0)}")
         log_message(f"CUDA memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
+        
+        # Initialize global memory tracker
+        global_memory_tracker = GPUMemoryTracker(device, log_message)
+        global_memory_tracker.reset_stats()
+        global_memory_tracker.log_memory_status("Training start", force=True)
+        
+        # Set enhanced memory management environment variables
+        import os
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True,max_split_size_mb:512'
+        torch.backends.cudnn.benchmark = True
+        
     else:
         device = torch.device('cpu')
         log_message("CUDA not available, using CPU")
+        global_memory_tracker = None
     
     log_message(f"Using device: {device}")
 
@@ -1209,6 +1423,10 @@ def main():
     log_message("=" * 60)
     
     for epoch in range(start_epoch, num_epochs):
+        # Pre-epoch memory check
+        if global_memory_tracker:
+            global_memory_tracker.log_memory_status(f"Epoch {epoch+1} start", force=True)
+        
         # Training phase
         avg_train_loss = train_epoch(
             model,
@@ -1221,7 +1439,7 @@ def main():
             total_epochs=num_epochs
         )
 
-        # Validation phase with mAP evaluation
+        # Validation phase with memory monitoring
         segm_mAP = None
         bbox_mAP = None
         val_loss = None
@@ -1242,6 +1460,14 @@ def main():
             bbox_mAP = eval_results['bbox_mAP'] 
             val_loss = eval_results['val_loss']
             evaluation_mode = eval_results['evaluation_mode']
+            
+            # Log memory information from evaluation
+            if 'memory_summary' in eval_results:
+                mem_summary = eval_results['memory_summary']
+                if isinstance(mem_summary, dict):
+                    log_message(f"  Evaluation memory summary:")
+                    log_message(f"    Peak memory: {mem_summary['peak_allocated_mb']:.1f} MB")
+                    log_message(f"    OOM warnings: {mem_summary['oom_warnings']}")
             
             # Log results
             log_message(f"  Validation results ({evaluation_mode}):")
@@ -1349,10 +1575,15 @@ def main():
             log_message("=" * 60)
             break
 
-        # Memory cleanup
+        # Post-epoch memory cleanup and monitoring
+        if global_memory_tracker:
+            global_memory_tracker.log_memory_status(f"Epoch {epoch+1} end", force=True)
+        
+        # Enhanced memory cleanup
         gc.collect()
         if device.type == 'cuda':
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
     # Save final model
     final_model_path = os.path.join(checkpoint_dir, "mask_rcnn_hybrid_resnext_panet_final.pth")
@@ -1375,7 +1606,10 @@ def main():
     # Create symlink to latest checkpoint
     create_symlink(checkpoint_dir, log_message)
 
-    # Final cleanup
+    # Final memory summary and cleanup
+    if global_memory_tracker:
+        global_memory_tracker.log_memory_summary()
+    
     if device.type == 'cuda':
         gc.collect()
         torch.cuda.empty_cache()
