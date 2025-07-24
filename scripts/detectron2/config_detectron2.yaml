@@ -1,0 +1,239 @@
+# Robust Detectron2 Configuration for Instance Segmentation
+# This configuration eliminates redundancies and provides clean, maintainable setup
+
+# =============================================================================
+# CORE MODEL CONFIGURATION
+# =============================================================================
+
+# Output directory for checkpoints and logs
+output_dir: "checkpoints/detectron2_v2/"
+
+# Model architecture configuration
+model:
+  # Backbone architecture: "resnet50" or "resnext101"
+  backbone: "resnext101"
+  
+  # PointRend configuration for enhanced mask boundaries
+  pointrend:
+    enabled: false
+    # Features to use for point-based refinement
+    in_features: ["p2", "p3", "p4", "p5"]
+    # Number of convolution layers in point head
+    num_conv: 3
+    # Convolution dimension
+    conv_dim: 256
+    # Number of points for coarse prediction (14x14 = 196)
+    num_points: 196
+    # Oversampling ratio for point selection
+    oversample_ratio: 3
+    # Importance sampling ratio
+    importance_sample_ratio: 0.75
+    # Number of subdivision steps for refinement
+    subdivision_steps: 5
+    # Number of points for fine prediction (28x28 = 784)
+    subdivision_num_points: 784
+
+  # Custom anchor configuration optimized for leaf dataset analysis
+  anchor_generator:
+    # Anchor sizes based on leaf dataset analysis (from Mask R-CNN pipeline)
+    sizes: [[257], [1139], [2056], [3183], [4475]]
+    # Aspect ratios optimized for leaf shapes (from Mask R-CNN pipeline)
+    aspect_ratios: [[0.76, 0.85, 0.94, 1.01, 1.13]]
+
+  # Feature Pyramid Network enhancements
+  fpn:
+    # Fusion method: "sum" (default) or "avg"
+    fuse_type: "avg"
+    # Normalization: "" (none), "GN" (GroupNorm), "BN" (BatchNorm)
+    norm: "GN"
+
+  # ResNet deformable convolutions for better non-rigid object handling
+  resnets:
+    # Enable deformable convolutions on deeper stages
+    deform_on_per_stage: [false, false, true, true]
+
+# =============================================================================
+# DATASET CONFIGURATION
+# =============================================================================
+
+datasets:
+  # Update to use existing coco100 dataset
+  train_json: "data/annotations/coco100/train/_annotations.coco.json"
+  val_json: "data/annotations/coco100/valid/_annotations.coco.json"
+  # Update image directories to use actual image locations
+  image_dirs:
+    - "data/annotations/coco100/train"
+    - "data/annotations/coco100/valid"
+    - "data/raw/images"  # Actual image location
+
+# =============================================================================
+# DATA LOADING CONFIGURATION
+# =============================================================================
+
+dataloader:
+  # Number of data loading workers
+  num_workers: 32
+
+# Input preprocessing configuration
+INPUT:
+  # Multi-scale training sizes for better generalization
+  MIN_SIZE_TRAIN: [800, 1024, 1280]
+  MAX_SIZE_TRAIN: 1600
+  # Test-time input sizes
+  MIN_SIZE_TEST: [1600]
+  MAX_SIZE_TEST: 1600
+
+# =============================================================================
+# TRAINING CONFIGURATION
+# =============================================================================
+
+solver:
+  # Images per batch (adjust based on GPU memory)
+  ims_per_batch: 8
+  # Base learning rate
+  base_lr: 0.0001
+  # Warmup iterations for stable training start
+  warmup_iters: 100
+  # Warmup factor
+  warmup_factor: 0.0001
+  # Total training iterations (100 epochs)
+  max_iter: 1300
+  # Learning rate decay steps (at 70% and 90% of total iterations)
+  steps: [910, 1170]
+  # Checkpoint saving frequency (aligned with evaluation period)
+  checkpoint_period: 65
+
+# =============================================================================
+# EARLY STOPPING CONFIGURATION
+# =============================================================================
+
+early_stopping:
+  # Enable early stopping to prevent overfitting
+  enabled: true
+  
+  # Primary metric to monitor for early stopping
+  # Options: "segm/AP", "segm/AP50", "segm/AP75", "bbox/AP", "loss_total"
+  metric: "segm/AP75"
+  
+  # Patience: number of evaluations without improvement before stopping
+  patience: 5
+  
+  # Minimum improvement threshold to reset patience counter
+  # Small positive value prevents stopping due to minor fluctuations
+  min_delta: 0.001
+  
+  # Direction of improvement: "max" for metrics like AP, "min" for losses
+  mode: "max"
+  
+  # Validation frequency (every 5 epochs)
+  eval_period: 65
+  
+  # Minimum iterations before early stopping can trigger (20 epochs)
+  min_iterations: 260
+  
+  # Optional: restore best weights when early stopping triggers
+  restore_best_weights: true
+  
+  # Optional: save best model separately
+  save_best_model: true
+  best_model_filename: "model_best.pth"
+
+# =============================================================================
+# MODEL HEAD CONFIGURATION
+# =============================================================================
+
+roi_heads:
+  # Number of object classes (1 for peduncle detection)
+  num_classes: 1
+  # ROI batch size per image
+  batch_size_per_image: 128
+  # Test-time score threshold
+  SCORE_THRESH_TEST: 0.7
+  # Non-maximum suppression threshold
+  NMS_THRESH_TEST: 0.5
+  # Maximum detections per image
+  DETECTIONS_PER_IMAGE: 3
+
+# Mask head configuration for precise segmentation
+mask_head:
+  # Number of convolution layers
+  NUM_CONV: 4
+  # Pooler resolution - MUST be 14 to match PointRend pretrained weights
+  POOLER_RESOLUTION: 14
+  # Pooler sampling ratio
+  POOLER_SAMPLING_RATIO: 2
+  # Mask loss weight (emphasize mask quality)
+  LOSS_WEIGHT: 2.0
+
+# =============================================================================
+# TEST-TIME CONFIGURATION
+# =============================================================================
+
+TEST:
+  # Test-time augmentation for improved accuracy
+  AUG:
+    ENABLED: true
+    MIN_SIZES: [800, 1024, 1280, 1600]
+    MAX_SIZE: 1600
+    FLIP: true
+
+# =============================================================================
+# LOGGING AND MONITORING
+# =============================================================================
+
+logging:
+  # Enable intelligent GPU utilization monitoring during training
+  gpu_monitoring: true
+  # Monitoring interval in seconds (minimum 10s, recommended 30-60s)
+  monitor_interval_sec: 30
+  
+  # Enhanced logging for early stopping
+  early_stopping_verbose: true
+  # Log early stopping metrics every N evaluations
+  early_stopping_log_frequency: 1
+
+# =============================================================================
+# CONFIGURATION NOTES
+# =============================================================================
+#
+# Early Stopping Implementation Notes:
+# 
+# 1. Metric Selection:
+#    - "segm/AP" (recommended): Overall segmentation average precision
+#    - "segm/AP50": AP at IoU threshold 0.5 (less strict, may stop earlier)
+#    - "segm/AP75": AP at IoU threshold 0.75 (more strict, better quality)
+#    - "bbox/AP": Bounding box AP (less relevant for segmentation quality)
+#
+# 2. Patience Configuration:
+#    - patience=4 with eval_period=500 means 2000 iterations without improvement
+#    - Adjust based on your dataset size and training dynamics
+#    - Larger datasets may need higher patience (5-8)
+#    - Smaller datasets may need lower patience (2-3)
+#
+# 3. min_delta Tuning:
+#    - 0.001 is good for AP metrics (0.1% improvement threshold)
+#    - Use 0.0001 for very precise stopping
+#    - Use 0.01 for less sensitive stopping
+#
+# 4. Performance Considerations:
+#    - eval_period=500 balances monitoring overhead with responsiveness
+#    - Set to checkpoint_period for efficiency (reuses evaluation)
+#    - Lower values (250-300) for more responsive stopping
+#    - Higher values (1000) for less overhead but slower response
+#
+# 5. Safety Mechanisms:
+#    - min_iterations=2000 prevents stopping during initial unstable phase
+#    - restore_best_weights=true ensures best model is preserved
+#    - save_best_model=true creates separate file for best checkpoint
+#
+# 6. Integration with Existing Training:
+#    - Works with existing checkpoint_period and solver configuration
+#    - Compatible with PointRend and all other model configurations
+#    - Evaluation metrics computed using existing COCOEvaluator
+#    - Early stopping hook integrates cleanly with Detectron2 training loop
+#
+# Recommended Starting Configuration:
+# - Start with default values above for most segmentation tasks
+# - Monitor training logs to see evaluation frequency and metric trends
+# - Adjust patience based on your dataset size and training stability
+# - Use segm/AP for general purpose, segm/AP75 for high-quality requirements
