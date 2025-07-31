@@ -179,7 +179,7 @@ def train_yolo11x(args, config):
             'box': 7.5,  # Box loss weight
             'cls': 0.5,  # Class loss weight 
             'dfl': 1.5,  # Distribution focal loss weight
-            'mask': 3.0,  # Mask loss weight (higher value prioritizes segmentation quality)
+            # Note: 'mask' loss weight is not supported in current Ultralytics version
 
             # Segmentation-specific thresholds
             'iou': 0.7,  # IoU threshold for NMS (higher for segmentation)
@@ -213,7 +213,7 @@ def train_yolo11x(args, config):
         # For finer mask prediction, add a final fine-tuning phase with lower LR
         seg_lr_schedule = {
             'cos_lr': True,          # Use cosine LR scheduler
-            'lr_dropout': 0.2,       # Random LR dropout for robustness
+            # Note: lr_dropout is not supported in current Ultralytics version
         }
 
         # Add segmentation-specific learning rate parameters to yolo_args
@@ -235,15 +235,6 @@ def train_yolo11x(args, config):
         print(f"Warmup: {lr_config['warmup_epochs']} epochs")
         print(f"Scheduler: {'Cosine' if seg_lr_schedule.get('cos_lr', False) else 'Linear'}")
 
-        # Safely add mask_iou_thr if supported in this version
-        try:
-            model_schema = getattr(model, 'model', None)
-            if model_schema:
-                # Test if parameter is supported before adding it
-                yolo_args['mask_iou_thr'] = 0.5
-        except (TypeError, ValueError):
-            print("Note: 'mask_iou_thr' parameter not supported in this YOLO version")
-
         # Add optional standard parameters if they exist
         if hasattr(args, 'amp') and args.amp:
             yolo_args['amp'] = True
@@ -254,21 +245,20 @@ def train_yolo11x(args, config):
         if hasattr(args, 'optimizer'):
             yolo_args['optimizer'] = args.optimizer
 
-        # Add YOLOv11-specific segmentation arguments if supported
-        if hasattr(args, 'attention') and args.attention != 'none':
-            try:
-                yolo_args['attention'] = args.attention
-            except (TypeError, ValueError):
-                print(f"Note: '{args.attention}' attention not supported in this YOLO version")
-
+        # Add dropout if specified
         if hasattr(args, 'dropout') and args.dropout > 0:
             yolo_args['dropout'] = args.dropout
 
-        if hasattr(args, 'use_repvgg') and args.use_repvgg:
-            try:
-                yolo_args['repvgg_block'] = True
-            except (TypeError, ValueError):
-                print("Note: 'repvgg_block' not supported in this YOLO version")
+        # Note: YOLOv11x-specific parameters are not supported in current Ultralytics version
+        # These parameters are commented out to avoid errors:
+        # - mask_iou_thr
+        # - attention (sca, eca)
+        # - repvgg_block
+        # - lr_dropout
+        # - mask (use task='segment' instead)
+        
+        print("Note: YOLOv11x-specific parameters (attention, repvgg_block, mask_iou_thr) are not supported in current Ultralytics version")
+        print("Training will proceed with standard YOLO segmentation parameters")
 
         # Memory management for large segmentation models
         if args.batch_size < 8 and args.device != 'cpu':
@@ -287,68 +277,100 @@ def train_yolo11x(args, config):
         # Define segmentation-optimized early stopping callback
         def custom_on_train_epoch_end(trainer):
             nonlocal best_fitness, best_epoch, patience_counter
+            
+            try:
+                # Get current epoch
+                current_epoch = getattr(trainer, 'epoch', 0)
+                
+                # Get fitness from trainer - YOLO stores this in trainer.fitness
+                current_fitness = None
+                
+                # Primary: Use trainer.fitness (this is the main metric YOLO uses)
+                if hasattr(trainer, 'fitness') and trainer.fitness is not None:
+                    current_fitness = float(trainer.fitness)
+                    print(f"Using trainer.fitness: {current_fitness:.5f}")
+                
+                # Fallback: try to get from trainer.metrics if fitness not available
+                elif hasattr(trainer, 'metrics') and trainer.metrics is not None:
+                    # Try mask metrics first for segmentation
+                    if hasattr(trainer.metrics, 'fitness'):
+                        current_fitness = float(trainer.metrics.fitness)
+                        print(f"Using metrics.fitness: {current_fitness:.5f}")
+                    elif hasattr(trainer.metrics, 'mp') and trainer.metrics.mp is not None:
+                        # Use mean precision as fallback
+                        current_fitness = float(trainer.metrics.mp)
+                        print(f"Using mean precision as fitness: {current_fitness:.5f}")
+                
+                # If still no fitness, skip early stopping for this epoch
+                if current_fitness is None:
+                    print(f"Warning: No fitness metric found in epoch {current_epoch}. Skipping early stopping check.")
+                    return True  # Continue training
 
-            # Get current metrics with careful handling
-            metrics = getattr(trainer, 'metrics', {}) or {}
-            current_epoch = getattr(trainer, 'epoch', 0)
+                # Early stopping logic
+                if current_fitness > (best_fitness + args.min_delta):
+                    best_fitness = current_fitness
+                    best_epoch = current_epoch
+                    patience_counter = 0
+                    
+                    print(f"New best fitness: {current_fitness:.5f} at epoch {current_epoch}")
+                    
+                    # Try to save best model (but don't fail if we can't)
+                    try:
+                        # Use trainer's save method if available (without custom path)
+                        if hasattr(trainer, 'save_model'):
+                            trainer.save_model()  # Let YOLO handle the path automatically
+                            print(f"Best model saved automatically by YOLO trainer")
+                        elif hasattr(trainer, 'best'):
+                            # Some YOLO versions save automatically
+                            print(f"Best model will be saved automatically by YOLO")
+                        else:
+                            print(f"Note: Manual model saving not available")
+                    except Exception as save_error:
+                        print(f"Warning: Could not save best model: {str(save_error)}")
+                        
+                else:
+                    patience_counter += 1
+                    print(f"No improvement for {patience_counter}/{args.patience} epochs. Best: {best_fitness:.5f}, Current: {current_fitness:.5f}")
 
-            # For segmentation models, prioritize mask metrics over box metrics
-            current_fitness = None
+                    if patience_counter >= args.patience:
+                        print(f"Early stopping triggered after {current_epoch} epochs")
+                        print(f"Best fitness {best_fitness:.5f} was achieved at epoch {best_epoch}")
+                        
+                        # Signal early stopping to YOLO trainer
+                        try:
+                            # Set the stop flag (this is the standard way)
+                            trainer.stopper.possible_stop = True
+                            if hasattr(trainer.stopper, 'stop'):
+                                trainer.stopper.stop = True
+                            # Also try setting epoch to epochs to trigger completion
+                            if hasattr(trainer, 'epochs'):
+                                trainer.epoch = trainer.epochs
+                        except:
+                            # Fallback: try other stopping mechanisms
+                            if hasattr(trainer, '_stop'):
+                                trainer._stop = True
+                            if hasattr(trainer, 'stop'):
+                                trainer.stop = True
+                        
+                        return False  # Signal to stop
 
-            # Try to get segmentation-specific metrics first
-            if hasattr(trainer, 'metrics') and isinstance(trainer.metrics, dict):
-                # For segmentation models, check mask metrics first
-                if 'mask' in trainer.metrics and hasattr(trainer.metrics['mask'], 'map'):
-                    current_fitness = trainer.metrics['mask'].map  # Use mask mAP as primary metric
-                    print(f"Using mask.map as fitness: {current_fitness:.5f}")
-                # Fallback to instance segmentation metrics if available
-                elif hasattr(trainer, 'fitness_mask'):
-                    current_fitness = trainer.fitness_mask
-                    print(f"Using fitness_mask as fitness: {current_fitness:.5f}")
-                # Fallback to standard box metrics if mask metrics not available
-                elif hasattr(trainer, 'fitness'):
-                    current_fitness = trainer.fitness
-                    print(f"Using box fitness as fallback: {current_fitness:.5f}")
+                return True  # Continue training
+                    
+            except Exception as e:
+                print(f"Warning: Early stopping callback error: {str(e)}")
+                print("Continuing training without early stopping for this epoch")
+                return True  # Continue training
 
-            # Default to 0 if still None
-            if current_fitness is None:
-                current_fitness = 0
-                print(f"Warning: No segmentation fitness found in epoch {current_epoch}. Using default 0.")
-
-            if current_fitness > (best_fitness + args.min_delta):
-                best_fitness = current_fitness
-                best_epoch = current_epoch
-                patience_counter = 0
-
-                # Save best model with segmentation-specific naming
-                best_model_path = os.path.join(trainer.save_dir, "weights", "yolo11x-seg_best.pt")
-                trainer.model.save(best_model_path)
-                print(f"New best segmentation model saved: {best_model_path}, fitness: {current_fitness:.5f}")
-            else:
-                patience_counter += 1
-                print(f"No improvement for {patience_counter}/{args.patience} epochs. Best: {best_fitness:.5f}, Current: {current_fitness:.5f}")
-
-                if patience_counter >= args.patience:
-                    print(f"Early stopping triggered after {current_epoch} epochs")
-
-                    # Use multiple approaches to ensure early stopping works
-                    # First try setting epochs directly if accessible
-                    trainer.epoch = trainer.epochs if hasattr(trainer, 'epochs') else trainer.epoch
-
-                    # Also try _stop attribute if available (more modern YOLO versions)
-                    if hasattr(trainer, '_stop'):
-                        trainer._stop = True
-
-                    # Some versions use this flag
-                    if hasattr(trainer, 'stop'):
-                        trainer.stop = True
-
-                    return False  # Signal to stop
-
-            return True  # Continue training
-
-        # Register early stopping callback
-        model.add_callback('on_train_epoch_end', custom_on_train_epoch_end)
+        # Register early stopping callback with error handling
+        try:
+            model.add_callback('on_train_epoch_end', custom_on_train_epoch_end)
+            print("Early stopping callback registered successfully")
+        except Exception as e:
+            print(f"Warning: Could not register early stopping callback: {str(e)}")
+            print("Training will continue without early stopping")
+        
+        print("Note: Early stopping is enabled but may be limited if metrics aren't available in expected format")
+        print("Training will continue for full duration if early stopping cannot access metrics")
 
         # Start training with segmentation-optimized parameters
         print("Starting YOLOv11x-seg training...")
@@ -416,9 +438,9 @@ def save_results(args, results):
             box_metrics = {
                 "box_map": float(results.box.map) if hasattr(results.box, 'map') else 0, 
                 "box_map50": float(results.box.map50) if hasattr(results.box, 'map50') else 0,
-                "box_precision": float(results.box.p) if hasattr(results.box, 'p') else 0,
-                "box_recall": float(results.box.r) if hasattr(results.box, 'r') else 0,
-                "box_f1": float(results.box.f1) if hasattr(results.box, 'f1') else 0
+                "box_precision": float(results.box.p.mean()) if hasattr(results.box, 'p') and hasattr(results.box.p, 'mean') else (float(results.box.p[0]) if hasattr(results.box, 'p') and len(results.box.p) > 0 else 0),
+                "box_recall": float(results.box.r.mean()) if hasattr(results.box, 'r') and hasattr(results.box.r, 'mean') else (float(results.box.r[0]) if hasattr(results.box, 'r') and len(results.box.r) > 0 else 0),
+                "box_f1": float(results.box.f1.mean()) if hasattr(results.box, 'f1') and hasattr(results.box.f1, 'mean') else (float(results.box.f1[0]) if hasattr(results.box, 'f1') and len(results.box.f1) > 0 else 0)
             }
             metrics.update(box_metrics)
 
@@ -427,9 +449,9 @@ def save_results(args, results):
             mask_metrics = {
                 "mask_map": float(results.mask.map) if hasattr(results.mask, 'map') else 0,
                 "mask_map50": float(results.mask.map50) if hasattr(results.mask, 'map50') else 0,
-                "mask_precision": float(results.mask.p) if hasattr(results.mask, 'p') else 0,
-                "mask_recall": float(results.mask.r) if hasattr(results.mask, 'r') else 0,
-                "mask_f1": float(results.mask.f1) if hasattr(results.mask, 'f1') else 0
+                "mask_precision": float(results.mask.p.mean()) if hasattr(results.mask, 'p') and hasattr(results.mask.p, 'mean') else (float(results.mask.p[0]) if hasattr(results.mask, 'p') and len(results.mask.p) > 0 else 0),
+                "mask_recall": float(results.mask.r.mean()) if hasattr(results.mask, 'r') and hasattr(results.mask.r, 'mean') else (float(results.mask.r[0]) if hasattr(results.mask, 'r') and len(results.mask.r) > 0 else 0),
+                "mask_f1": float(results.mask.f1.mean()) if hasattr(results.mask, 'f1') and hasattr(results.mask.f1, 'mean') else (float(results.mask.f1[0]) if hasattr(results.mask, 'f1') and len(results.mask.f1) > 0 else 0)
             }
             metrics.update(mask_metrics)
 
