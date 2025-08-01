@@ -146,12 +146,13 @@ def train_yolo11x(args, config):
             torch.cuda.empty_cache()
             print("Cleared CUDA memory before loading model")
 
-        # Load YOLOv11x-seg model
-        model = YOLO(args.model)
+        # Load YOLOv11x-seg model - force segmentation mode
+        model = YOLO(args.model, task='segment')
         print(f"YOLOv11x-seg model loaded: {args.model}")
 
         # Validate that model supports segmentation
         model_task = getattr(model, 'task', None)
+        print(f"Model task mode: {model_task}")
         if model_task != 'segment' and not args.model.endswith('-seg.pt'):
             print(f"Warning: Model may not support segmentation (task: {model_task})")
             print("Will attempt to train with segmentation parameters anyway")
@@ -179,15 +180,19 @@ def train_yolo11x(args, config):
             'box': 7.5,  # Box loss weight
             'cls': 0.5,  # Class loss weight 
             'dfl': 1.5,  # Distribution focal loss weight
-            # Note: 'mask' loss weight is not supported in current Ultralytics version
-
+            
             # Segmentation-specific thresholds
             'iou': 0.7,  # IoU threshold for NMS (higher for segmentation)
+            'conf': 0.001,  # Lower confidence threshold for segmentation
+            'max_det': 300,  # Maximum detections
 
             # Segmentation refinement options
             'nms': True,  # Use NMS
             'retina_masks': True,  # Use high-resolution segmentation masks
             'single_cls': False,  # Treat as multi-class segmentation
+            
+            # Force validation during training to compute mask metrics
+            'val': True,
 
             # Advanced segmentation options
             'augment': True,  # Use data augmentation for robust segmentation
@@ -261,9 +266,9 @@ def train_yolo11x(args, config):
         print("Training will proceed with standard YOLO segmentation parameters")
 
         # Memory management for large segmentation models
+        # Note: gradient accumulation is handled automatically by YOLO for small batch sizes
         if args.batch_size < 8 and args.device != 'cpu':
-            yolo_args['accumulate'] = 2  # Gradient accumulation for large segmentation models
-            print(f"Using gradient accumulation (accumulate=2) for small batch size ({args.batch_size})")
+            print(f"Small batch size ({args.batch_size}) detected - YOLO will handle gradient accumulation automatically")
 
         # Log segmentation-specific parameters
         print("\nTraining with segmentation-optimized parameters:")
@@ -336,22 +341,39 @@ def train_yolo11x(args, config):
                         print(f"Early stopping triggered after {current_epoch} epochs")
                         print(f"Best fitness {best_fitness:.5f} was achieved at epoch {best_epoch}")
                         
-                        # Signal early stopping to YOLO trainer
+                        # Force early stopping using multiple approaches
                         try:
-                            # Set the stop flag (this is the standard way)
-                            trainer.stopper.possible_stop = True
-                            if hasattr(trainer.stopper, 'stop'):
-                                trainer.stopper.stop = True
-                            # Also try setting epoch to epochs to trigger completion
+                            # Method 1: Set epoch to last epoch to trigger natural completion
                             if hasattr(trainer, 'epochs'):
-                                trainer.epoch = trainer.epochs
-                        except:
-                            # Fallback: try other stopping mechanisms
-                            if hasattr(trainer, '_stop'):
-                                trainer._stop = True
-                            if hasattr(trainer, 'stop'):
-                                trainer.stop = True
+                                trainer.epoch = trainer.epochs - 1  # Set to last epoch
+                                print(f"Set trainer.epoch to {trainer.epoch} to trigger completion")
+                            
+                            # Method 2: Use YOLO's built-in stopper mechanism
+                            if hasattr(trainer, 'stopper'):
+                                if hasattr(trainer.stopper, 'possible_stop'):
+                                    trainer.stopper.possible_stop = True
+                                    print("Set trainer.stopper.possible_stop = True")
+                                if hasattr(trainer.stopper, 'stop'):
+                                    trainer.stopper.stop = True
+                                    print("Set trainer.stopper.stop = True")
+                                # Try setting patience to 0 to force immediate stopping
+                                if hasattr(trainer.stopper, 'patience'):
+                                    trainer.stopper.patience = 0
+                                    print("Set trainer.stopper.patience = 0")
+                            
+                            # Method 3: Modify the trainer's args to reduce epochs
+                            if hasattr(trainer, 'args') and hasattr(trainer.args, 'epochs'):
+                                trainer.args.epochs = current_epoch + 1  # End after current epoch
+                                print(f"Set trainer.args.epochs to {trainer.args.epochs}")
+                            
+                            # Method 4: Set a stop flag on the trainer directly
+                            trainer._early_stop = True
+                            print("Set trainer._early_stop = True")
+                            
+                        except Exception as stop_error:
+                            print(f"Error setting stop flags: {stop_error}")
                         
+                        print("Early stopping: All stop mechanisms activated")
                         return False  # Signal to stop
 
                 return True  # Continue training
@@ -433,35 +455,125 @@ def save_results(args, results):
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")
         }
 
+        # Debug: Print available attributes in results object
+        print(f"Available results attributes: {dir(results)}")
+        
         # Box detection metrics (keep for comparison)
+        box_metrics = {}
         if hasattr(results, 'box'):
-            box_metrics = {
-                "box_map": float(results.box.map) if hasattr(results.box, 'map') else 0, 
-                "box_map50": float(results.box.map50) if hasattr(results.box, 'map50') else 0,
-                "box_precision": float(results.box.p.mean()) if hasattr(results.box, 'p') and hasattr(results.box.p, 'mean') else (float(results.box.p[0]) if hasattr(results.box, 'p') and len(results.box.p) > 0 else 0),
-                "box_recall": float(results.box.r.mean()) if hasattr(results.box, 'r') and hasattr(results.box.r, 'mean') else (float(results.box.r[0]) if hasattr(results.box, 'r') and len(results.box.r) > 0 else 0),
-                "box_f1": float(results.box.f1.mean()) if hasattr(results.box, 'f1') and hasattr(results.box.f1, 'mean') else (float(results.box.f1[0]) if hasattr(results.box, 'f1') and len(results.box.f1) > 0 else 0)
-            }
-            metrics.update(box_metrics)
+            try:
+                box_metrics = {
+                    "box_map": float(results.box.map) if hasattr(results.box, 'map') else 0, 
+                    "box_map50": float(results.box.map50) if hasattr(results.box, 'map50') else 0,
+                    "box_precision": float(results.box.p.mean()) if hasattr(results.box, 'p') and hasattr(results.box.p, 'mean') else (float(results.box.p[0]) if hasattr(results.box, 'p') and len(results.box.p) > 0 else 0),
+                    "box_recall": float(results.box.r.mean()) if hasattr(results.box, 'r') and hasattr(results.box.r, 'mean') else (float(results.box.r[0]) if hasattr(results.box, 'r') and len(results.box.r) > 0 else 0),
+                    "box_f1": float(results.box.f1.mean()) if hasattr(results.box, 'f1') and hasattr(results.box.f1, 'mean') else (float(results.box.f1[0]) if hasattr(results.box, 'f1') and len(results.box.f1) > 0 else 0)
+                }
+            except Exception as e:
+                print(f"Warning: Could not extract box metrics: {e}")
+                box_metrics = {"box_map": 0, "box_map50": 0, "box_precision": 0, "box_recall": 0, "box_f1": 0}
+        
+        metrics.update(box_metrics)
 
-        # Segmentation-specific metrics
-        if hasattr(results, 'mask'):
+        # Segmentation-specific metrics - improved extraction for SegmentMetrics
+        mask_metrics = {}
+        mask_found = False
+        
+        print(f"Results object type: {type(results)}")
+        print(f"Results attributes: {[attr for attr in dir(results) if not attr.startswith('_')]}")
+        
+        # Check if this is a SegmentMetrics object (ultralytics.utils.metrics.SegmentMetrics)
+        if hasattr(results, 'seg') or hasattr(results, 'masks'):
+            print("SegmentMetrics object detected")
+            try:
+                # Try accessing segmentation metrics via 'seg' attribute
+                if hasattr(results, 'seg') and results.seg is not None:
+                    seg_data = results.seg
+                    print(f"Seg data attributes: {[attr for attr in dir(seg_data) if not attr.startswith('_')]}")
+                    mask_metrics = {
+                        "mask_map": float(seg_data.map) if hasattr(seg_data, 'map') else 0,
+                        "mask_map50": float(seg_data.map50) if hasattr(seg_data, 'map50') else 0,
+                        "mask_precision": float(seg_data.p.mean()) if hasattr(seg_data, 'p') and hasattr(seg_data.p, 'mean') else (float(seg_data.p[0]) if hasattr(seg_data, 'p') and len(seg_data.p) > 0 else 0),
+                        "mask_recall": float(seg_data.r.mean()) if hasattr(seg_data, 'r') and hasattr(seg_data.r, 'mean') else (float(seg_data.r[0]) if hasattr(seg_data, 'r') and len(seg_data.r) > 0 else 0),
+                        "mask_f1": float(seg_data.f1.mean()) if hasattr(seg_data, 'f1') and hasattr(seg_data.f1, 'mean') else (float(seg_data.f1[0]) if hasattr(seg_data, 'f1') and len(seg_data.f1) > 0 else 0)
+                    }
+                    mask_found = True
+                    print(f"Successfully extracted seg metrics: {mask_metrics}")
+                # Try accessing via 'masks' attribute
+                elif hasattr(results, 'masks') and results.masks is not None:
+                    masks_data = results.masks
+                    print(f"Masks data attributes: {[attr for attr in dir(masks_data) if not attr.startswith('_')]}")
+                    mask_metrics = {
+                        "mask_map": float(masks_data.map) if hasattr(masks_data, 'map') else 0,
+                        "mask_map50": float(masks_data.map50) if hasattr(masks_data, 'map50') else 0,
+                        "mask_precision": float(masks_data.p.mean()) if hasattr(masks_data, 'p') and hasattr(masks_data.p, 'mean') else 0,
+                        "mask_recall": float(masks_data.r.mean()) if hasattr(masks_data, 'r') and hasattr(masks_data.r, 'mean') else 0,
+                        "mask_f1": float(masks_data.f1.mean()) if hasattr(masks_data, 'f1') and hasattr(masks_data.f1, 'mean') else 0
+                    }
+                    mask_found = True
+                    print(f"Successfully extracted masks metrics: {mask_metrics}")
+            except Exception as e:
+                print(f"Warning: Could not extract seg/masks metrics: {e}")
+        
+        # Fallback: Try accessing 'mask' attribute (older format)
+        if not mask_found and hasattr(results, 'mask'):
+            try:
+                print(f"Mask object attributes: {[attr for attr in dir(results.mask) if not attr.startswith('_')]}")
+                mask_metrics = {
+                    "mask_map": float(results.mask.map) if hasattr(results.mask, 'map') else 0,
+                    "mask_map50": float(results.mask.map50) if hasattr(results.mask, 'map50') else 0,
+                    "mask_precision": float(results.mask.p.mean()) if hasattr(results.mask, 'p') and hasattr(results.mask.p, 'mean') else (float(results.mask.p[0]) if hasattr(results.mask, 'p') and len(results.mask.p) > 0 else 0),
+                    "mask_recall": float(results.mask.r.mean()) if hasattr(results.mask, 'r') and hasattr(results.mask.r, 'mean') else (float(results.mask.r[0]) if hasattr(results.mask, 'r') and len(results.mask.r) > 0 else 0),
+                    "mask_f1": float(results.mask.f1.mean()) if hasattr(results.mask, 'f1') and hasattr(results.mask.f1, 'mean') else (float(results.mask.f1[0]) if hasattr(results.mask, 'f1') and len(results.mask.f1) > 0 else 0)
+                }
+                mask_found = True
+                print(f"Successfully extracted mask metrics: {mask_metrics}")
+            except Exception as e:
+                print(f"Warning: Could not extract mask metrics from results.mask: {e}")
+        
+        # Final fallback: Try direct attribute access
+        if not mask_found:
+            try:
+                # Try to find any segmentation-related attributes
+                seg_attrs = [attr for attr in dir(results) if 'mask' in attr.lower() or 'seg' in attr.lower()]
+                print(f"Found potential segmentation attributes: {seg_attrs}")
+                
+                # Look for common metric patterns
+                for attr_base in ['mask', 'seg', 'segment']:
+                    for metric_type in ['_map', '_map50', '_precision', '_recall', '_f1']:
+                        attr_name = attr_base + metric_type
+                        if hasattr(results, attr_name):
+                            mask_metrics[f"mask{metric_type}"] = float(getattr(results, attr_name))
+                            mask_found = True
+                            
+                if mask_found:
+                    print(f"Successfully extracted direct attributes: {mask_metrics}")
+            except Exception as e:
+                print(f"Warning: Could not extract mask metrics from direct attributes: {e}")
+        
+        # If still no mask metrics found, set defaults but warn
+        if not mask_found:
+            print("❌ Warning: No mask metrics found in results object")
+            print("This suggests segmentation metrics are not being computed properly")
             mask_metrics = {
-                "mask_map": float(results.mask.map) if hasattr(results.mask, 'map') else 0,
-                "mask_map50": float(results.mask.map50) if hasattr(results.mask, 'map50') else 0,
-                "mask_precision": float(results.mask.p.mean()) if hasattr(results.mask, 'p') and hasattr(results.mask.p, 'mean') else (float(results.mask.p[0]) if hasattr(results.mask, 'p') and len(results.mask.p) > 0 else 0),
-                "mask_recall": float(results.mask.r.mean()) if hasattr(results.mask, 'r') and hasattr(results.mask.r, 'mean') else (float(results.mask.r[0]) if hasattr(results.mask, 'r') and len(results.mask.r) > 0 else 0),
-                "mask_f1": float(results.mask.f1.mean()) if hasattr(results.mask, 'f1') and hasattr(results.mask.f1, 'mean') else (float(results.mask.f1[0]) if hasattr(results.mask, 'f1') and len(results.mask.f1) > 0 else 0)
+                "mask_map": 0.0,
+                "mask_map50": 0.0,
+                "mask_precision": 0.0,
+                "mask_recall": 0.0,
+                "mask_f1": 0.0
             }
-            metrics.update(mask_metrics)
+        else:
+            print("✅ Successfully extracted segmentation metrics!")
+        
+        metrics.update(mask_metrics)
 
-            # Make primary fitness based on mask metrics if available
+        # Set primary metric based on what's available
+        if mask_found and mask_metrics["mask_map"] > 0:
             metrics["primary_metric"] = "mask_map"
             metrics["fitness"] = mask_metrics["mask_map"]
         else:
-            # Fallback to box metrics if mask metrics not available
             metrics["primary_metric"] = "box_map"
-            metrics["fitness"] = box_metrics["box_map"] if "box_map" in metrics else 0
+            metrics["fitness"] = box_metrics.get("box_map", 0)
 
         # Loss values (both box and mask)
         if hasattr(results, 'box_loss'):
@@ -488,11 +600,14 @@ def save_results(args, results):
 
         # Print primary metrics 
         print(f"\nYOLOv11x-seg Performance:")
-        if "mask_map" in metrics:
+        if "mask_map" in metrics and metrics["mask_map"] > 0:
             print(f"  Mask mAP: {metrics['mask_map']:.4f}")
             print(f"  Mask mAP50: {metrics['mask_map50']:.4f}")
         if "mask_iou" in metrics:
             print(f"  Mask IoU: {metrics['mask_iou']:.4f}")
+        if "box_map" in metrics:
+            print(f"  Box mAP: {metrics['box_map']:.4f}")
+            print(f"  Box mAP50: {metrics['box_map50']:.4f}")
 
     except Exception as e:
         print(f"Warning: Could not save segmentation metrics: {str(e)}")
