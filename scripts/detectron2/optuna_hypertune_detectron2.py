@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 class PointRendOptimizer:
     """
     Bayesian optimization for PointRend hyperparameters using Optuna.
-    Based on experimental results and designed for production reliability.
     """
     
     def __init__(self, 
