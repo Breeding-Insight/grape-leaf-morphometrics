@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class PointRendOptimizer:
     """
     Bayesian optimization for PointRend hyperparameters using Optuna.
-    Based on your experimental results and designed for production reliability.
+    Based on experimental results and designed for production reliability.
     """
     
     def __init__(self, 
@@ -79,7 +79,7 @@ class PointRendOptimizer:
     def create_config_for_trial(self, trial_params, trial_number):
         """
         Create a modified config file for this specific trial.
-        Engineering approach: modify config systematically based on your actual config structure.
+        Modify the config systematically based on the config structure.
         """
         
         # Deep copy base config
@@ -135,7 +135,6 @@ class PointRendOptimizer:
     def objective(self, trial):
         """
         Objective function for Optuna optimization.
-        Robust error handling like ship system diagnostics.
         """
         
         # Suggest hyperparameters for this trial
@@ -408,7 +407,7 @@ def main():
     Main execution function with proper error handling.
     """
     
-    # Initialize optimizer with your specific paths
+    # Initialize optimizer with specific paths
     optimizer = PointRendOptimizer(
         base_config_path="scripts/detectron2_v2/train_val/X101-FPN_pointrend/config_detectron2.yaml",
         training_script="scripts/detectron2_v2/train_val/X101-FPN_pointrend/train_detectron2.py",
