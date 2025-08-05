@@ -1,12 +1,16 @@
 # Robust Detectron2 Configuration for Instance Segmentation
 # This configuration eliminates redundancies and provides clean, maintainable setup
+# 
+# OPTIMIZED CONFIGURATION - Trial 8 from Optuna Bayesian Optimization
+# Best AP75: 78.217822 achieved with hyperparameter optimization
+# Optimization completed: Sun Aug 3 12:12:20 PM EDT 2025
 
 # =============================================================================
 # CORE MODEL CONFIGURATION
 # =============================================================================
 
 # Output directory for checkpoints and logs
-output_dir: "checkpoints/detectron2_v2/"
+output_dir: "checkpoints/detectron2_pointrend/leaf_pointrend_8-1"
 
 # Model architecture configuration
 model:
@@ -15,7 +19,7 @@ model:
   
   # PointRend configuration for enhanced mask boundaries
   pointrend:
-    enabled: false
+    enabled: true  # ENABLED for enhanced boundary refinement
     # Features to use for point-based refinement
     in_features: ["p2", "p3", "p4", "p5"]
     # Number of convolution layers in point head
@@ -26,18 +30,18 @@ model:
     num_points: 196
     # Oversampling ratio for point selection
     oversample_ratio: 3
-    # Importance sampling ratio
-    importance_sample_ratio: 0.75
-    # Number of subdivision steps for refinement
-    subdivision_steps: 5
-    # Number of points for fine prediction (28x28 = 784)
-    subdivision_num_points: 784
+    # Importance sampling ratio (optimized by Optuna trial 8)
+    importance_sample_ratio: 0.7322442574508008
+    # Number of subdivision steps for refinement (optimized by Optuna trial 8)
+    subdivision_steps: 3
+    # Number of points for fine prediction (optimized by Optuna trial 8)
+    subdivision_num_points: 660
 
-  # Custom anchor configuration optimized for leaf dataset analysis
+  # Custom anchor configuration optimized for peduncle dataset
   anchor_generator:
-    # Anchor sizes based on leaf dataset analysis (from Mask R-CNN pipeline)
+    # Anchor sizes based on dataset analysis
     sizes: [[257], [1139], [2056], [3183], [4475]]
-    # Aspect ratios optimized for leaf shapes (from Mask R-CNN pipeline)
+    # Aspect ratios optimized for leaf sizes
     aspect_ratios: [[0.76, 0.85, 0.94, 1.01, 1.13]]
 
   # Feature Pyramid Network enhancements
@@ -57,14 +61,14 @@ model:
 # =============================================================================
 
 datasets:
-  # Update to use existing coco100 dataset
-  train_json: "data/annotations/coco100/train/_annotations.coco.json"
-  val_json: "data/annotations/coco100/valid/_annotations.coco.json"
-  # Update image directories to use actual image locations
+  # Training annotations
+  train_json: "data/annotations/coco/train/_annotations.coco.json"
+  # Validation annotations  
+  val_json: "data/annotations/coco/valid/_annotations.coco.json"
+  # Image directories to search (supports multiple paths for flexibility)
   image_dirs:
-    - "data/annotations/coco100/train"
-    - "data/annotations/coco100/valid"
-    - "data/raw/images"  # Actual image location
+    - "data/annotations/coco/train"
+    - "data/annotations/coco/valid"
 
 # =============================================================================
 # DATA LOADING CONFIGURATION
@@ -82,6 +86,16 @@ INPUT:
   # Test-time input sizes
   MIN_SIZE_TEST: [1600]
   MAX_SIZE_TEST: 1600
+  # Mask format: 'bitmask' for PointRend, 'polygon' for standard Mask R-CNN
+  # (Automatically set based on PointRend enablement in training script)
+  # MASK_FORMAT: "bitmask"  # Uncomment to force bitmask format
+
+# Data augmentation configuration (optimized by Optuna trial 8)
+augmentation:
+  # Horizontal flip probability
+  horizontal_flip_prob: 0.6485842360750871
+  # Vertical flip probability  
+  vertical_flip_prob: 0.4214688307596458
 
 # =============================================================================
 # TRAINING CONFIGURATION
@@ -89,20 +103,21 @@ INPUT:
 
 solver:
   # Images per batch (adjust based on GPU memory)
-  ims_per_batch: 8
-  # Base learning rate
-  base_lr: 0.0001
-  # Warmup iterations for stable training start
-  warmup_iters: 100
+  ims_per_batch: 5
+  # Base learning rate (optimized by Optuna trial 8)
+  base_lr: 0.0003518920565826005
+  # Weight decay (optimized by Optuna trial 8)
+  weight_decay: 0.0007234279845665417
+  # Warmup iterations for stable training start (optimized by Optuna trial 8)
+  warmup_iters: 1712
   # Warmup factor
   warmup_factor: 0.0001
-  # Total training iterations (100 epochs)
-  max_iter: 1300
-  # Learning rate decay steps (at 70% and 90% of total iterations)
-  steps: [910, 1170]
-  # Checkpoint saving frequency (aligned with evaluation period)
-  checkpoint_period: 65
-
+  # Total training iterations (generous buffer beyond observed peak at 5250)
+  max_iter: 7000
+  # Learning rate decay steps (optimized by Optuna trial 8: 0.6900211269531271 * 7000 = 4830)
+  steps: [4830]
+  # Checkpoint saving frequency
+  checkpoint_period: 500
 # =============================================================================
 # EARLY STOPPING CONFIGURATION
 # =============================================================================
@@ -115,8 +130,8 @@ early_stopping:
   # Options: "segm/AP", "segm/AP50", "segm/AP75", "bbox/AP", "loss_total"
   metric: "segm/AP75"
   
-  # Patience: number of evaluations without improvement before stopping
-  patience: 5
+  # Moderately aggressive patience to catch peak performance while allowing for brief plateaus
+  patience: 3
   
   # Minimum improvement threshold to reset patience counter
   # Small positive value prevents stopping due to minor fluctuations
@@ -125,11 +140,11 @@ early_stopping:
   # Direction of improvement: "max" for metrics like AP, "min" for losses
   mode: "max"
   
-  # Validation frequency (every 5 epochs)
-  eval_period: 65
+  # More frequent validation for faster early stopping detection
+  eval_period: 150
   
-  # Minimum iterations before early stopping can trigger (20 epochs)
-  min_iterations: 260
+  # Minimum iterations before early stopping can trigger (aligned with 7000 iter schedule)
+  min_iterations: 2000
   
   # Optional: restore best weights when early stopping triggers
   restore_best_weights: true
@@ -145,10 +160,12 @@ early_stopping:
 roi_heads:
   # Number of object classes (1 for peduncle detection)
   num_classes: 1
-  # ROI batch size per image
-  batch_size_per_image: 128
-  # Test-time score threshold
-  SCORE_THRESH_TEST: 0.7
+  # ROI batch size per image (optimized by Optuna trial 8)
+  batch_size_per_image: 143
+  # Positive fraction for ROI sampling (optimized by Optuna trial 8)
+  positive_fraction: 0.43888778463576217
+  # Test-time score threshold (optimized by Optuna trial 8)
+  SCORE_THRESH_TEST: 0.6843197248237434
   # Non-maximum suppression threshold
   NMS_THRESH_TEST: 0.5
   # Maximum detections per image
