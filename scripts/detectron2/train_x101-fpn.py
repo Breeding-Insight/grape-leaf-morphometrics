@@ -15,6 +15,9 @@ from detectron2.data.datasets.coco import load_coco_json
 from detectron2.projects.point_rend import add_pointrend_config
 from detectron2.checkpoint import DetectionCheckpointer
 from detectron2.utils.events import get_event_storage
+from detectron2.projects import point_rend
+from detectron2.config import get_cfg
+from detectron2.engine import DefaultPredictor
 import threading
 import time
 import subprocess
@@ -24,6 +27,7 @@ import shutil
 import copy
 import torch
 import gc
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -147,17 +151,20 @@ class EarlyStoppingHook(HookBase):
         try:
             # Run evaluation
             logger.info("Running validation evaluation...")
+            
+            # Ensure model is in eval mode for evaluation
+            was_training = self.trainer.model.training
+            self.trainer.model.eval()
+            
             eval_results = inference_on_dataset(
                 self.trainer.model, 
                 self.val_loader, 
                 self.evaluator
             )
             
-            # Check if evaluation produced any results
-            if not eval_results or all(not v for v in eval_results.values() if isinstance(v, dict)):
-                logger.warning(f"Model produced no predictions during evaluation at iteration {current_iter}")
-                logger.warning("This is normal in early training stages. Skipping early stopping check.")
-                return
+            # CRITICAL: Restore training mode
+            if was_training:
+                self.trainer.model.train()
             
             # Extract the metric we're monitoring
             current_metric = self._extract_metric(eval_results, self.metric_name)
@@ -165,7 +172,6 @@ class EarlyStoppingHook(HookBase):
             if current_metric is None:
                 logger.warning(f"Could not extract metric '{self.metric_name}' from evaluation results")
                 logger.warning(f"Available metrics: {list(eval_results.keys())}")
-                logger.warning("This may indicate the model hasn't learned to make predictions yet.")
                 return
             
             # Log current performance
@@ -241,6 +247,11 @@ class EarlyStoppingHook(HookBase):
         except Exception as e:
             logger.error(f"Error during early stopping evaluation: {str(e)}")
             logger.warning("Continuing training despite evaluation error")
+            
+            # Ensure model is restored to training mode even after error
+            if hasattr(self, 'trainer') and self.trainer and hasattr(self.trainer, 'model'):
+                self.trainer.model.train()
+                logger.info("Model restored to training mode after evaluation error")
     
     def _extract_metric(self, eval_results: Dict, metric_name: str) -> Optional[float]:
         """
@@ -264,16 +275,14 @@ class EarlyStoppingHook(HookBase):
             if metric_name in eval_results:
                 return float(eval_results[metric_name])
             
-            # Special handling for common metric aliases (avoid self-recursion)
+            # Special handling for common metric aliases (only non-self-referencing ones)
             metric_aliases = {
-                "AP": "segm/AP"  # Only map short form to full form
+                "AP": "segm/AP"  # Default to segmentation AP
             }
             
             if metric_name in metric_aliases:
                 alias = metric_aliases[metric_name]
-                # Avoid infinite recursion by only calling if alias is different
-                if alias != metric_name:
-                    return self._extract_metric(eval_results, alias)
+                return self._extract_metric(eval_results, alias)
             
             return None
             
@@ -353,6 +362,11 @@ class EarlyStoppingHook(HookBase):
             logger.info(f"Training stopped at iteration: {self.trainer.iter}")
             logger.info(f"Best {self.metric_name}: {self.best_metric:.6f} at iteration {self.best_iteration}")
             
+            # CRITICAL: Preserve the actual best metric values before checkpoint restoration
+            # This prevents the checkpoint loading from overwriting our current best values
+            actual_best_metric = self.best_metric
+            actual_best_iteration = self.best_iteration
+            
             # Restore best weights if enabled
             if self.restore_best_weights and self.best_checkpoint_path:
                 logger.info("Restoring best model weights...")
@@ -362,6 +376,11 @@ class EarlyStoppingHook(HookBase):
                     logger.info("Best model weights restored successfully")
                 except Exception as e:
                     logger.error(f"Failed to restore best weights: {str(e)}")
+            
+            # CRITICAL: Restore the actual best values after checkpoint loading
+            # The checkpoint loading may have overwritten these with stale values
+            self.best_metric = actual_best_metric
+            self.best_iteration = actual_best_iteration
             
             # Save final evaluation history
             self._save_evaluation_history()
@@ -411,6 +430,34 @@ class StopTraining(Exception):
 class ConfigurationError(Exception):
     """Custom exception for configuration-related errors."""
     pass
+
+
+def print_pointrend_installation_guide():
+    """Print comprehensive PointRend installation instructions."""
+    logger.info("=" * 80)
+    logger.info("🔧 POINTREND INSTALLATION GUIDE")
+    logger.info("=" * 80)
+    logger.info("")
+    logger.info("PointRend is not installed or not properly configured. To fix this:")
+    logger.info("")
+    logger.info("📥 OPTION 1: Install from source (recommended)")
+    logger.info("   1. Clone detectron2 with projects:")
+    logger.info("      git clone https://github.com/facebookresearch/detectron2.git")
+    logger.info("   2. Install PointRend project:")
+    logger.info("      cd detectron2/projects/PointRend")
+    logger.info("      pip install -e .")
+    logger.info("")
+    logger.info("📦 OPTION 2: Install detectron2 with all projects")
+    logger.info("   pip install 'git+https://github.com/facebookresearch/detectron2.git#subdirectory=projects/PointRend'")
+    logger.info("")
+    logger.info("🔍 OPTION 3: Verify existing installation")
+    logger.info("   Check if PointRend modules can be imported:")
+    logger.info("   python -c \"from detectron2.projects.point_rend import add_pointrend_config; print('PointRend OK')\"")
+    logger.info("")
+    logger.info("🎛️  OPTION 4: Use standard Mask R-CNN instead")
+    logger.info("   Set model.pointrend.enabled: false in your config")
+    logger.info("")
+    logger.info("=" * 80)
 
 
 class RobustDatasetMapper(DatasetMapper):
@@ -492,12 +539,21 @@ class DetectronConfigManager:
             logger.info("Adding PointRend configuration support...")
             try:
                 add_pointrend_config(self.cfg)
+                logger.info("✅ PointRend configuration schema added successfully")
             except Exception as e:
-                logger.error(f"Failed to add PointRend configuration: {str(e)}")
-                logger.error("PointRend may not be properly installed. Please install with:")
-                logger.error("  cd detectron2/projects/PointRend && pip install -e .")
-                logger.error("Or disable PointRend in your config (model.pointrend.enabled: false)")
-                raise ConfigurationError("PointRend configuration failed") from e
+                logger.error(f"❌ Failed to add PointRend configuration: {str(e)}")
+                logger.error("PointRend is not properly installed. To fix this:")
+                logger.error("  1. Install PointRend: cd detectron2/projects/PointRend && pip install -e .")
+                logger.error("  2. Or disable PointRend in your config: model.pointrend.enabled: false")
+                logger.error("  3. Or use a standard mask head config instead")
+                
+                # Automatically fall back to non-PointRend mode
+                logger.warning("🔄 Automatically falling back to standard mask head training...")
+                use_pointrend = False
+                
+                # Update config to reflect the fallback
+                pointrend_config = self.config_data.get("model", {}).get("pointrend", {})
+                pointrend_config["enabled"] = False
         
         # Step 3: Load the correct base configuration
         base_config_info = self._select_base_config()
@@ -553,9 +609,52 @@ class DetectronConfigManager:
     # [Include all the existing methods from DetectronConfigManager - _should_use_pointrend, _select_base_config, etc.]
     # For brevity, I'll include the key methods for early stopping integration
     
+    def _check_pointrend_availability(self) -> Tuple[bool, str]:
+        """
+        Check if PointRend is properly installed and available.
+        
+        Returns:
+            Tuple of (is_available, error_message)
+        """
+        try:
+            # Try importing core PointRend modules
+            from detectron2.projects.point_rend import add_pointrend_config
+            from detectron2.projects.point_rend.roi_heads import PointRendROIHeads
+            from detectron2.projects.point_rend.mask_head import PointRendMaskHead
+            from detectron2.projects.point_rend.point_features import point_sample
+            return True, ""
+        except ImportError as e:
+            error_msg = f"PointRend modules not available: {str(e)}"
+            return False, error_msg
+        except Exception as e:
+            error_msg = f"PointRend check failed: {str(e)}"
+            return False, error_msg
+
     def _should_use_pointrend(self) -> bool:
         """Determine if PointRend should be enabled."""
-        return self.config_data.get("model", {}).get("pointrend", {}).get("enabled", False)
+        requested = self.config_data.get("model", {}).get("pointrend", {}).get("enabled", False)
+        
+        if not requested:
+            return False
+            
+        # Check if PointRend is actually available
+        is_available, error_msg = self._check_pointrend_availability()
+        
+        if not is_available:
+            logger.error(f"❌ PointRend not available: {error_msg}")
+            logger.error("PointRend is not available. Falling back to regular mask head hypertuning.")
+            
+            # Show installation guide
+            print_pointrend_installation_guide()
+            
+            # Automatically disable PointRend in config to prevent further errors
+            pointrend_config = self.config_data.get("model", {}).get("pointrend", {})
+            pointrend_config["enabled"] = False
+            
+            return False
+        
+        logger.info("✅ PointRend availability verified")
+        return True
     
     def _select_base_config(self) -> Dict[str, str]:
         """Select appropriate base configuration based on requirements."""
@@ -573,9 +672,82 @@ class DetectronConfigManager:
         return self.MODEL_CONFIG_MATRIX[config_key]
     
     def _load_project_config(self, config_path: str):
-        """Load configuration from detectron2 projects directory or download if needed."""
-        # [Existing implementation from original file]
-        pass
+        """Load PointRend configuration using working method without broken dependencies."""
+        try:
+            # Check if PointRend is available before proceeding
+            is_available, error_msg = self._check_pointrend_availability()
+            if not is_available:
+                logger.error(f"❌ Cannot load PointRend config: {error_msg}")
+                raise ConfigurationError(f"PointRend not available: {error_msg}")
+            
+            logger.info(f"✅ Loading PointRend config using manual configuration method")
+            
+            # Instead of loading the problematic config files with broken dependencies,
+            # we'll build the PointRend configuration manually based on a working base config
+            from detectron2 import model_zoo
+            
+            # Determine the appropriate base config based on the requested PointRend config
+            if "pointrend_rcnn_R_50" in config_path:
+                base_config = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+                logger.info(f"Using ResNet-50 base for PointRend")
+            elif "pointrend_rcnn_X_101" in config_path:
+                base_config = "COCO-InstanceSegmentation/mask_rcnn_X_101_32x8d_FPN_3x.yaml"
+                logger.info(f"Using ResNeXt-101 base for PointRend")
+            elif "pointrend_rcnn_R_101" in config_path:
+                base_config = "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"
+                logger.info(f"Using ResNet-101 base for PointRend")
+            else:
+                # Default fallback
+                base_config = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+                logger.warning(f"Unknown PointRend config, using ResNet-50 base")
+            
+            # Load the working base config from model zoo
+            self.cfg.merge_from_file(model_zoo.get_config_file(base_config))
+            logger.info(f"✅ Loaded base config: {base_config}")
+            
+            # Apply PointRend-specific modifications manually
+            self.cfg.MODEL.ROI_HEADS.NAME = "PointRendROIHeads"
+            self.cfg.MODEL.ROI_MASK_HEAD.NAME = "PointRendMaskHead"
+            self.cfg.MODEL.ROI_MASK_HEAD.POOLER_TYPE = ""  # No RoI pooling for PointRend
+            self.cfg.MODEL.ROI_MASK_HEAD.FC_DIM = 1024
+            self.cfg.MODEL.ROI_MASK_HEAD.NUM_FC = 2
+            self.cfg.MODEL.ROI_MASK_HEAD.POINT_HEAD_ON = True  # Enable point head
+            
+            # Pre-configure Point Head to ensure it exists (will be refined in _apply_pointrend_configurations)
+            self.cfg.MODEL.POINT_HEAD.NUM_CLASSES = self.cfg.MODEL.ROI_HEADS.NUM_CLASSES
+            self.cfg.MODEL.POINT_HEAD.IN_FEATURES = ["p2", "p3", "p4", "p5"]
+            self.cfg.MODEL.POINT_HEAD.NUM_CONV = 3
+            self.cfg.MODEL.POINT_HEAD.CONV_DIM = 256
+            self.cfg.MODEL.POINT_HEAD.NUM_POINTS = 196
+            self.cfg.MODEL.POINT_HEAD.OVERSAMPLE_RATIO = 3.0
+            self.cfg.MODEL.POINT_HEAD.IMPORTANCE_SAMPLE_RATIO = 0.75
+            self.cfg.MODEL.POINT_HEAD.SUBDIVISION_STEPS = 5
+            self.cfg.MODEL.POINT_HEAD.SUBDIVISION_NUM_POINTS = 784
+            
+            logger.info(f"✅ PointRend configuration applied successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to load PointRend config: {str(e)}")
+            logger.warning("🔄 Falling back to equivalent standard Mask R-CNN config...")
+            
+            # Automatic fallback to standard config
+            if "pointrend_rcnn_R_50" in config_path:
+                fallback_config = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+            elif "pointrend_rcnn_X_101" in config_path:
+                fallback_config = "COCO-InstanceSegmentation/mask_rcnn_X_101_32x8d_FPN_3x.yaml"
+            elif "pointrend_rcnn_R_101" in config_path:
+                fallback_config = "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml"
+            else:
+                fallback_config = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
+            
+            logger.warning(f"🔄 Using fallback config: {fallback_config}")
+            self.cfg.merge_from_file(model_zoo.get_config_file(fallback_config))
+            
+            # Disable PointRend in the config since we're using fallback
+            pointrend_config = self.config_data.get("model", {}).get("pointrend", {})
+            pointrend_config["enabled"] = False
+            
+            raise ConfigurationError(f"PointRend config loading failed, fell back to standard Mask R-CNN")
     
     def _apply_custom_configurations(self):
         """Apply all custom configurations in proper order."""
@@ -660,6 +832,8 @@ class DetectronConfigManager:
         
         if "batch_size_per_image" in roi_config:
             self.cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = roi_config["batch_size_per_image"]
+        if "positive_fraction" in roi_config:
+            self.cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION = roi_config["positive_fraction"]
         if "SCORE_THRESH_TEST" in roi_config:
             self.cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = roi_config["SCORE_THRESH_TEST"]
         if "NMS_THRESH_TEST" in roi_config:
@@ -689,18 +863,39 @@ class DetectronConfigManager:
         
         if "MAX_SIZE_TEST" in input_config:
             self.cfg.INPUT.MAX_SIZE_TEST = input_config["MAX_SIZE_TEST"]
+        
+        # Critical: Set mask format for PointRend compatibility
+        if self._should_use_pointrend():
+            self.cfg.INPUT.MASK_FORMAT = "bitmask"
+            logger.info("Set INPUT.MASK_FORMAT to 'bitmask' for PointRend compatibility")
+        else:
+            # Use polygon format for standard Mask R-CNN (more memory efficient)
+            self.cfg.INPUT.MASK_FORMAT = "polygon"
     
     def _apply_mask_head_config(self):
+        # Handle both old direct mask_head config and new nested roi_heads.mask_head config
         mask_config = self.config_data.get("mask_head", {})
+        
+        # Also check for nested mask head config in roi_heads (used by mask head hypertuning wrapper)
+        roi_heads_config = self.config_data.get("roi_heads", {})
+        if "mask_head" in roi_heads_config:
+            nested_mask_config = roi_heads_config["mask_head"]
+            # Convert from hypertuning wrapper format to config format
+            if "num_conv" in nested_mask_config:
+                mask_config["NUM_CONV"] = nested_mask_config["num_conv"]
+            if "loss_weight" in nested_mask_config:
+                mask_config["LOSS_WEIGHT"] = nested_mask_config["loss_weight"]
         
         if "NUM_CONV" in mask_config:
             self.cfg.MODEL.ROI_MASK_HEAD.NUM_CONV = mask_config["NUM_CONV"]
+            logger.info(f"Set mask head num_conv: {mask_config['NUM_CONV']}")
         if "POOLER_RESOLUTION" in mask_config:
             self.cfg.MODEL.ROI_MASK_HEAD.POOLER_RESOLUTION = mask_config["POOLER_RESOLUTION"]
         if "POOLER_SAMPLING_RATIO" in mask_config:
             self.cfg.MODEL.ROI_MASK_HEAD.POOLER_SAMPLING_RATIO = mask_config["POOLER_SAMPLING_RATIO"]
         if "LOSS_WEIGHT" in mask_config:
             self.cfg.MODEL.ROI_MASK_HEAD.LOSS_WEIGHT = mask_config["LOSS_WEIGHT"]
+            logger.info(f"Set mask head loss_weight: {mask_config['LOSS_WEIGHT']}")
     
     def _apply_test_config(self):
         test_config = self.config_data.get("TEST", {})
@@ -717,21 +912,52 @@ class DetectronConfigManager:
                     self.cfg.TEST.AUG.FLIP = aug_config["FLIP"]
     
     def _apply_pointrend_configurations(self):
-        """Apply PointRend-specific configurations."""
+        """Apply PointRend-specific configurations with validation."""
+        # Double-check PointRend is available before applying configs
+        is_available, error_msg = self._check_pointrend_availability()
+        if not is_available:
+            logger.error(f"❌ Cannot apply PointRend configurations: {error_msg}")
+            return
+            
         pointrend_config = self.config_data.get("model", {}).get("pointrend", {})
         
-        self.cfg.MODEL.ROI_HEADS.NAME = "PointRendROIHeads"
-        self.cfg.MODEL.ROI_MASK_HEAD.NAME = "PointRendMaskHead"
-        self.cfg.MODEL.POINT_HEAD.NUM_CLASSES = self.cfg.MODEL.ROI_HEADS.NUM_CLASSES
-        
-        self.cfg.MODEL.POINT_HEAD.IN_FEATURES = pointrend_config.get("in_features", ["p2", "p3", "p4", "p5"])
-        self.cfg.MODEL.POINT_HEAD.NUM_CONV = pointrend_config.get("num_conv", 3)
-        self.cfg.MODEL.POINT_HEAD.CONV_DIM = pointrend_config.get("conv_dim", 256)
-        self.cfg.MODEL.POINT_HEAD.NUM_POINTS = pointrend_config.get("num_points", 196)
-        self.cfg.MODEL.POINT_HEAD.OVERSAMPLE_RATIO = pointrend_config.get("oversample_ratio", 3)
-        self.cfg.MODEL.POINT_HEAD.IMPORTANCE_SAMPLE_RATIO = pointrend_config.get("importance_sample_ratio", 0.75)
-        self.cfg.MODEL.POINT_HEAD.SUBDIVISION_STEPS = pointrend_config.get("subdivision_steps", 5)
-        self.cfg.MODEL.POINT_HEAD.SUBDIVISION_NUM_POINTS = pointrend_config.get("subdivision_num_points", 784)
+        try:
+            # Set PointRend-specific model components
+            self.cfg.MODEL.ROI_HEADS.NAME = "PointRendROIHeads"
+            self.cfg.MODEL.ROI_MASK_HEAD.NAME = "PointRendMaskHead"
+            
+            # Essential: Configure mask head to use PointRend
+            self.cfg.MODEL.ROI_MASK_HEAD.POOLER_TYPE = ""  # No pooling for PointRend
+            
+            # Configure Point Head (this was missing and causing the error)
+            self.cfg.MODEL.POINT_HEAD.NUM_CLASSES = self.cfg.MODEL.ROI_HEADS.NUM_CLASSES
+            self.cfg.MODEL.POINT_HEAD.IN_FEATURES = pointrend_config.get("in_features", ["p2", "p3", "p4", "p5"])
+            self.cfg.MODEL.POINT_HEAD.NUM_CONV = pointrend_config.get("num_conv", 3)
+            self.cfg.MODEL.POINT_HEAD.CONV_DIM = pointrend_config.get("conv_dim", 256)
+            self.cfg.MODEL.POINT_HEAD.NUM_POINTS = pointrend_config.get("num_points", 196)
+            self.cfg.MODEL.POINT_HEAD.OVERSAMPLE_RATIO = pointrend_config.get("oversample_ratio", 3.0)
+            self.cfg.MODEL.POINT_HEAD.IMPORTANCE_SAMPLE_RATIO = pointrend_config.get("importance_sample_ratio", 0.75)
+            self.cfg.MODEL.POINT_HEAD.SUBDIVISION_STEPS = pointrend_config.get("subdivision_steps", 5)
+            self.cfg.MODEL.POINT_HEAD.SUBDIVISION_NUM_POINTS = pointrend_config.get("subdivision_num_points", 784)
+            
+            # Critical: Set the mask point subdivision steps that was missing
+            self.cfg.MODEL.ROI_MASK_HEAD.POINT_HEAD_ON = True
+            
+            logger.info("✅ PointRend configurations applied successfully")
+            logger.info(f"   Point Head Conv Layers: {self.cfg.MODEL.POINT_HEAD.NUM_CONV}")
+            logger.info(f"   Subdivision Steps: {self.cfg.MODEL.POINT_HEAD.SUBDIVISION_STEPS}")
+            logger.info(f"   Subdivision Points: {self.cfg.MODEL.POINT_HEAD.SUBDIVISION_NUM_POINTS}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to apply PointRend configurations: {str(e)}")
+            logger.error("Falling back to standard Mask R-CNN configuration")
+            
+            # Reset to standard configuration
+            self.cfg.MODEL.ROI_HEADS.NAME = "StandardROIHeads"
+            self.cfg.MODEL.ROI_MASK_HEAD.NAME = "MaskRCNNConvUpsampleHead"
+            
+            # Disable PointRend in the config
+            pointrend_config["enabled"] = False
     
     def _validate_configuration(self):
         """Validate final configuration for consistency and completeness."""
@@ -1090,8 +1316,8 @@ class GPUMonitor:
 
 
 def main():
-    """Main training function with robust error handling and early stopping."""
-    parser = argparse.ArgumentParser(description="Robust Detectron2 Training System with Early Stopping")
+    """Main training function with robust error handling and early stopping for mask head experiments."""
+    parser = argparse.ArgumentParser(description="Robust Detectron2 Training System for Mask Head Hypertuning")
     parser.add_argument("--config", type=str, required=True, help="Path to YAML config file")
     parser.add_argument("--output_dir", type=str, help="Override output directory")
     parser.add_argument("--resume", action="store_true", help="Resume training if checkpoint exists")
@@ -1106,9 +1332,261 @@ def main():
         with open(args.config, 'r') as f:
             config_data = yaml.safe_load(f)
         
-        # Determine project root
-        project_root = Path(__file__).resolve().parents[3]
+        # Determine project root - use PWD to respect symlinks since Optuna runs from project root
+        import os
+        project_root = Path(os.environ.get('PWD', Path.cwd()))
         logger.info(f"Project root: {project_root}")
+        
+        # ============================================================================
+        # EXPERIMENT IDENTIFICATION - CLEAR LOGGING FOR SLURM TRACKING
+        # ============================================================================
+        
+        # Extract parameters from config for experiment identification
+        learning_rate = config_data.get("solver", {}).get("base_lr", "unknown")
+        batch_size = config_data.get("solver", {}).get("ims_per_batch", "unknown")
+        output_dir = args.output_dir or config_data.get("output_dir", "output")
+        
+        # Extract mask head parameters from config
+        mask_head_config = config_data.get("roi_heads", {}).get("mask_head", {})
+        num_conv = mask_head_config.get("num_conv", config_data.get("mask_head", {}).get("NUM_CONV", "unknown"))
+        loss_weight = mask_head_config.get("loss_weight", config_data.get("mask_head", {}).get("LOSS_WEIGHT", "unknown"))
+        
+        # Extract PointRend parameters from config
+        pointrend_config = config_data.get("model", {}).get("pointrend", {})
+        pointrend_enabled = pointrend_config.get("enabled", False)
+        subdivision_steps = pointrend_config.get("subdivision_steps", "unknown")
+        subdivision_points = pointrend_config.get("subdivision_num_points", "unknown")
+        importance_ratio = pointrend_config.get("importance_sample_ratio", "unknown")
+        
+        # Extract ROI sampling parameters from config
+        roi_heads_config = config_data.get("roi_heads", {})
+        roi_batch_size_per_image = roi_heads_config.get("batch_size_per_image", "unknown")
+        roi_positive_fraction = roi_heads_config.get("positive_fraction", "unknown")
+        roi_score_thresh_test = roi_heads_config.get("SCORE_THRESH_TEST", "unknown")
+        
+        # Determine experiment type based on output directory pattern
+        experiment_info = ""
+        experiment_number = "N/A"
+        experiment_type = "single"  # single, mask_head, pointrend, batch_size, or learning_rate
+        primary_param = f"LR:{learning_rate}, Batch:{batch_size}, MaskHead:{num_conv}conv/{loss_weight}loss"
+        param_name = "Training Config"
+        
+        # Check for PointRend grid search pattern
+        if "pointrend_" in str(output_dir) and "_exp_" in str(output_dir):
+            # Extract experiment info from PointRend output directory pattern
+            try:
+                # Pattern: "pointrend_finer_subdivision_exp_1" 
+                import re
+                exp_pattern = r"exp_(\d+)"
+                strategy_pattern = r"pointrend_(\w+)_exp_"
+                
+                exp_match = re.search(exp_pattern, str(output_dir))
+                strategy_match = re.search(strategy_pattern, str(output_dir))
+                
+                if exp_match:
+                    experiment_number = int(exp_match.group(1)) + 1  # Convert to 1-indexed
+                    
+                    if strategy_match:
+                        strategy_name = strategy_match.group(1)
+                        experiment_info = f"POINTREND HYPERTUNING - EXPERIMENT {experiment_number}"
+                        experiment_type = "pointrend"
+                        primary_param = f"Strategy: {strategy_name}"
+                        param_name = "PointRend Strategy"
+                    else:
+                        experiment_info = f"POINTREND EXPERIMENT {experiment_number}"
+                        experiment_type = "pointrend"
+                        primary_param = f"Steps:{subdivision_steps}, Points:{subdivision_points}, Ratio:{importance_ratio}"
+                        param_name = "PointRend Config"
+                
+            except (ValueError, AttributeError):
+                experiment_info = "POINTREND EXPERIMENT (could not parse details)"
+                experiment_type = "pointrend"
+                primary_param = f"Steps:{subdivision_steps}, Points:{subdivision_points}, Ratio:{importance_ratio}"
+                param_name = "PointRend Config"
+        
+        # Check for mask head grid search pattern
+        elif "mask_head_" in str(output_dir) and "_exp_" in str(output_dir):
+            # Extract experiment info from mask head output directory pattern
+            try:
+                # Pattern: "mask_head_deeper_mask_head_exp_1" 
+                import re
+                exp_pattern = r"exp_(\d+)"
+                strategy_pattern = r"mask_head_(\w+)_exp_"
+                
+                exp_match = re.search(exp_pattern, str(output_dir))
+                strategy_match = re.search(strategy_pattern, str(output_dir))
+                
+                if exp_match:
+                    experiment_number = int(exp_match.group(1)) + 1  # Convert to 1-indexed
+                    
+                    if strategy_match:
+                        strategy_name = strategy_match.group(1)
+                        experiment_info = f"MASK HEAD HYPERTUNING - EXPERIMENT {experiment_number}"
+                        experiment_type = "mask_head"
+                        primary_param = f"Strategy: {strategy_name}"
+                        param_name = "Mask Head Strategy"
+                    else:
+                        experiment_info = f"MASK HEAD EXPERIMENT {experiment_number}"
+                        experiment_type = "mask_head"
+                        primary_param = f"NumConv:{num_conv}, LossWeight:{loss_weight}"
+                        param_name = "Mask Head Config"
+                
+            except (ValueError, AttributeError):
+                experiment_info = "MASK HEAD EXPERIMENT (could not parse details)"
+                experiment_type = "mask_head"
+                primary_param = f"NumConv:{num_conv}, LossWeight:{loss_weight}"
+                param_name = "Mask Head Config"
+        
+        # Check for batch size grid search pattern
+        elif "_batch_" in str(output_dir) and "_exp_" in str(output_dir):
+            # Extract experiment info from batch size output directory pattern
+            try:
+                # Pattern: "batch_8_exp_2" 
+                import re
+                batch_pattern = r"batch_(\d+)"
+                exp_pattern = r"exp_(\d+)"
+                
+                batch_match = re.search(batch_pattern, str(output_dir))
+                exp_match = re.search(exp_pattern, str(output_dir))
+                
+                if batch_match and exp_match:
+                    detected_batch = int(batch_match.group(1))
+                    experiment_number = int(exp_match.group(1)) + 1  # Convert to 1-indexed
+                    experiment_info = f"BATCH SIZE GRID SEARCH - EXPERIMENT {experiment_number}"
+                    experiment_type = "batch_size"
+                    primary_param = detected_batch
+                    param_name = "Batch Size"
+                    
+                    # Update batch size from directory (authoritative source)
+                    batch_size = detected_batch
+                
+            except (ValueError, AttributeError):
+                experiment_info = "BATCH SIZE EXPERIMENT (could not parse details)"
+                experiment_type = "batch_size"
+                primary_param = batch_size
+                param_name = "Batch Size"
+        
+        elif "lr_" in str(output_dir) and "exp_" in str(output_dir):
+            # Extract experiment info from learning rate output directory pattern
+            try:
+                # Pattern: "lr_0.00025_exp_2"
+                import re
+                lr_pattern = r"lr_([\d\.]+)"
+                exp_pattern = r"exp_(\d+)"
+                
+                lr_match = re.search(lr_pattern, str(output_dir))
+                exp_match = re.search(exp_pattern, str(output_dir))
+                
+                if lr_match and exp_match:
+                    detected_lr = float(lr_match.group(1))
+                    experiment_number = int(exp_match.group(1)) + 1  # Convert to 1-indexed
+                    experiment_info = f"LEARNING RATE GRID SEARCH - EXPERIMENT {experiment_number}"
+                    experiment_type = "learning_rate"
+                    primary_param = detected_lr
+                    param_name = "Learning Rate"
+                    
+                    # Verify LR consistency
+                    if abs(detected_lr - learning_rate) > 1e-8:
+                        logger.warning(f"LR mismatch: config={learning_rate}, directory={detected_lr}")
+                        learning_rate = detected_lr  # Use the one from directory as source of truth
+                        primary_param = detected_lr
+                
+            except (ValueError, AttributeError):
+                experiment_info = "LEARNING RATE EXPERIMENT (could not parse details)"
+                experiment_type = "learning_rate"
+                primary_param = learning_rate
+                param_name = "Learning Rate"
+        
+        # Print prominent experiment header
+        header_line = "=" * 80
+        logger.info("")
+        logger.info(header_line)
+        logger.info("🚀 DETECTRON2 TRAINING EXPERIMENT STARTING")
+        logger.info(header_line)
+        
+        if experiment_info:
+            logger.info(f"📊 {experiment_info}")
+            logger.info(f"🎯 EXPERIMENT NUMBER: {experiment_number}")
+        else:
+            logger.info("📊 SINGLE TRAINING MODE")
+        
+        logger.info(f"🔧 {param_name.upper()}: {primary_param}")
+        
+        # Display other parameters only when they're not the focus of the experiment
+        if experiment_type == "batch_size":
+            # For batch size experiments, show other params but not batch size
+            logger.info(f"🎭 MASK HEAD - NumConv: {num_conv}, LossWeight: {loss_weight}")
+            logger.info(f"📈 LEARNING RATE: {learning_rate}")
+        elif experiment_type == "learning_rate":
+            # For learning rate experiments, show other params but not learning rate
+            logger.info(f"🎭 MASK HEAD - NumConv: {num_conv}, LossWeight: {loss_weight}")
+            logger.info(f"📦 BATCH SIZE: {batch_size}")
+        elif experiment_type == "mask_head":
+            # For mask head experiments, show other params but not mask head details
+            logger.info(f"📦 BATCH SIZE: {batch_size}")
+            logger.info(f"📈 LEARNING RATE: {learning_rate}")
+        elif experiment_type == "pointrend":
+            # For PointRend experiments, show other params but not PointRend details
+            logger.info(f"🎭 MASK HEAD - NumConv: {num_conv}, LossWeight: {loss_weight}")
+            logger.info(f"📦 BATCH SIZE: {batch_size}")
+            logger.info(f"📈 LEARNING RATE: {learning_rate}")
+            logger.info(f"🎯 POINTREND - Steps: {subdivision_steps}, Points: {subdivision_points}, Ratio: {importance_ratio}")
+        # For single mode, primary param already shows everything, so no redundant display
+        
+        # Always show ROI sampling parameters (important for all experiments)
+        logger.info(f"🎯 ROI SAMPLING - BatchPerImg: {roi_batch_size_per_image}, PosFrac: {roi_positive_fraction}, ScoreThresh: {roi_score_thresh_test}")
+        
+        logger.info(f"📁 OUTPUT DIRECTORY: {output_dir}")
+        logger.info(f"⚙️  CONFIG FILE: {args.config}")
+        logger.info(f"🕐 START TIME: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(header_line)
+        logger.info("")
+        
+        # Also log to stdout for immediate visibility in SLURM logs
+        print(f"\n{header_line}")
+        print(f"🚀 DETECTRON2 TRAINING EXPERIMENT STARTING")
+        print(f"{header_line}")
+        
+        if experiment_info:
+            print(f"📊 {experiment_info}")
+            print(f"🎯 EXPERIMENT NUMBER: {experiment_number}")
+        else:
+            print(f"📊 SINGLE TRAINING MODE")
+            
+        print(f"🔧 {param_name.upper()}: {primary_param}")
+        
+        # Display other parameters only when they're not the focus of the experiment
+        if experiment_type == "batch_size":
+            # For batch size experiments, show other params but not batch size
+            print(f"🎭 MASK HEAD - NumConv: {num_conv}, LossWeight: {loss_weight}")
+            print(f"📈 LEARNING RATE: {learning_rate}")
+        elif experiment_type == "learning_rate":
+            # For learning rate experiments, show other params but not learning rate
+            print(f"🎭 MASK HEAD - NumConv: {num_conv}, LossWeight: {loss_weight}")
+            print(f"📦 BATCH SIZE: {batch_size}")
+        elif experiment_type == "mask_head":
+            # For mask head experiments, show other params but not mask head details
+            print(f"📦 BATCH SIZE: {batch_size}")
+            print(f"📈 LEARNING RATE: {learning_rate}")
+        elif experiment_type == "pointrend":
+            # For PointRend experiments, show other params but not PointRend details
+            print(f"🎭 MASK HEAD - NumConv: {num_conv}, LossWeight: {loss_weight}")
+            print(f"📦 BATCH SIZE: {batch_size}")
+            print(f"📈 LEARNING RATE: {learning_rate}")
+            print(f"🎯 POINTREND - Steps: {subdivision_steps}, Points: {subdivision_points}, Ratio: {importance_ratio}")
+        # For single mode, primary param already shows everything, so no redundant display
+        
+        # Always show ROI sampling parameters (important for all experiments)
+        print(f"🎯 ROI SAMPLING - BatchPerImg: {roi_batch_size_per_image}, PosFrac: {roi_positive_fraction}, ScoreThresh: {roi_score_thresh_test}")
+        
+        print(f"📁 OUTPUT DIRECTORY: {output_dir}")
+        print(f"⚙️  CONFIG FILE: {args.config}")
+        print(f"🕐 START TIME: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{header_line}\n")
+        
+        # ============================================================================
+        # CONTINUE WITH EXISTING LOGIC
+        # ============================================================================
         
         # Override output directory if specified
         if args.output_dir:
@@ -1119,6 +1597,9 @@ def main():
             if "early_stopping" in config_data:
                 config_data["early_stopping"]["enabled"] = False
             logger.info("Early stopping disabled via command line argument")
+        
+        # Standard single training mode (removed grid search mode)
+        logger.info("=== SINGLE TRAINING MODE ===")
         
         # Initialize managers
         config_manager = DetectronConfigManager(config_data, project_root)
@@ -1141,14 +1622,42 @@ def main():
         logger.info(f"Model: {cfg.MODEL.META_ARCHITECTURE}")
         logger.info(f"Backbone: {cfg.MODEL.BACKBONE.NAME}")
         logger.info(f"Classes: {cfg.MODEL.ROI_HEADS.NUM_CLASSES}")
+        
+        # Prominently display mask head configuration
+        logger.info("=== Mask Head Configuration ===")
+        logger.info(f"Mask Head Conv Layers: {cfg.MODEL.ROI_MASK_HEAD.NUM_CONV}")
+        logger.info(f"Mask Head Loss Weight: {cfg.MODEL.ROI_MASK_HEAD.LOSS_WEIGHT}")
+        logger.info(f"Mask Head Pooler Resolution: {cfg.MODEL.ROI_MASK_HEAD.POOLER_RESOLUTION}")
+        
+        logger.info("=== Training Configuration ===")
         logger.info(f"Max iterations: {cfg.SOLVER.MAX_ITER}")
         logger.info(f"Learning rate: {cfg.SOLVER.BASE_LR}")
         logger.info(f"Batch size: {cfg.SOLVER.IMS_PER_BATCH}")
         logger.info(f"Output directory: {cfg.OUTPUT_DIR}")
         
-        if cfg.MODEL.ROI_HEADS.NAME == "PointRendROIHeads":
-            logger.info("PointRend: ENABLED")
-            logger.info(f"  Subdivision steps: {cfg.MODEL.POINT_HEAD.SUBDIVISION_STEPS}")
+        # Check if PointRend was requested vs. actually enabled
+        pointrend_requested = config_data.get("model", {}).get("pointrend", {}).get("enabled", False)
+        pointrend_actual = cfg.MODEL.ROI_HEADS.NAME == "PointRendROIHeads"
+        
+        if pointrend_actual:
+            logger.info("=== PointRend Configuration ===")
+            logger.info("✅ PointRend: ENABLED")
+            logger.info(f"  Subdivision Steps: {cfg.MODEL.POINT_HEAD.SUBDIVISION_STEPS}")
+            logger.info(f"  Subdivision Points: {cfg.MODEL.POINT_HEAD.SUBDIVISION_NUM_POINTS}")
+            logger.info(f"  Importance Sample Ratio: {cfg.MODEL.POINT_HEAD.IMPORTANCE_SAMPLE_RATIO}")
+            logger.info(f"  Point Head Conv Layers: {cfg.MODEL.POINT_HEAD.NUM_CONV}")
+            logger.info(f"  Point Head Conv Dim: {cfg.MODEL.POINT_HEAD.CONV_DIM}")
+        elif pointrend_requested:
+            logger.warning("=== PointRend Configuration ===")
+            logger.warning("⚠️  PointRend: REQUESTED BUT NOT ENABLED")
+            logger.warning("   PointRend was requested in config but fell back to standard Mask R-CNN")
+            logger.warning("   This usually means PointRend is not properly installed")
+            logger.warning("   To install PointRend:")
+            logger.warning("     1. git clone https://github.com/facebookresearch/detectron2.git")
+            logger.warning("     2. cd detectron2/projects/PointRend && pip install -e .")
+            logger.warning("     3. Restart your training")
+        else:
+            logger.info("PointRend: DISABLED")
         
         # Early stopping summary
         if early_stopping_config.get("enabled", False):
@@ -1222,6 +1731,8 @@ def main():
                 logger.info("Proceeding with random initialization")
         
         # Start training
+        training_start_time = time.time()
+        
         logger.info("=== Starting Training with Early Stopping ===")
         logger.info("Note: Data augmentation pipeline includes:")
         logger.info("  - Random horizontal flip")
@@ -1234,9 +1745,18 @@ def main():
             logger.info("Early stopping will monitor validation performance and prevent overfitting")
             logger.info(f"Evaluation will run every {early_stopping_config.get('eval_period', 500)} iterations")
         
+        # Print training start message to stdout for SLURM visibility
+        if experiment_info:
+            print(f"🚀 Starting Experiment {experiment_number} training with {param_name} {primary_param}...")
+        else:
+            print(f"🚀 Starting training with {param_name} {primary_param}...")
+        
         try:
             trainer.train()
+            training_time = time.time() - training_start_time
+            
             logger.info("Training completed successfully!")
+            print(f"✅ Training completed successfully in {training_time/60:.1f} minutes!")
             
             # Check if training was stopped early
             if hasattr(trainer, 'early_stopping_hook') and trainer.early_stopping_hook:
@@ -1318,17 +1838,65 @@ def main():
             for filename in available_files:
                 logger.info(f"  - {filename}")
         
+        # ============================================================================
+        # EXPERIMENT COMPLETION SUMMARY
+        # ============================================================================
+        
+        total_experiment_time = time.time() - training_start_time if 'training_start_time' in locals() else 0
+        
+        completion_header = "=" * 80
+        logger.info("")
+        logger.info(completion_header)
+        logger.info("🎉 DETECTRON2 TRAINING EXPERIMENT COMPLETED")
+        logger.info(completion_header)
+        
+        if experiment_info:
+            logger.info(f"📊 {experiment_info}")
+            logger.info(f"🎯 EXPERIMENT NUMBER: {experiment_number}")
+        else:
+            logger.info("📊 SINGLE TRAINING MODE")
+        
+        logger.info(f"🔧 {param_name.upper()} TESTED: {primary_param}")
+        logger.info(f"📁 RESULTS SAVED TO: {output_dir}")
+        logger.info(f"⏱️  TOTAL EXPERIMENT TIME: {total_experiment_time/60:.1f} minutes")
+        logger.info(f"🕐 COMPLETION TIME: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(completion_header)
+        logger.info("")
+        
+        # Also print completion summary to stdout for SLURM logs
+        print(f"\n{completion_header}")
+        print(f"🎉 DETECTRON2 TRAINING EXPERIMENT COMPLETED")
+        print(f"{completion_header}")
+        
+        if experiment_info:
+            print(f"📊 {experiment_info}")
+            print(f"🎯 EXPERIMENT NUMBER: {experiment_number}")
+        else:
+            print(f"📊 SINGLE TRAINING MODE")
+            
+        print(f"🔧 {param_name.upper()} TESTED: {primary_param}")
+        print(f"📁 RESULTS SAVED TO: {output_dir}")
+        print(f"⏱️  TOTAL EXPERIMENT TIME: {total_experiment_time/60:.1f} minutes")
+        print(f"🕐 COMPLETION TIME: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"{completion_header}\n")
+        
         logger.info("Training pipeline completed!")
         
     except ConfigurationError as e:
         logger.error(f"Configuration error: {str(e)}")
+        if 'experiment_info' in locals() and experiment_info:
+            print(f"❌ Experiment {experiment_number} ({param_name} {primary_param}) failed: Configuration error")
         return 1
     except FileNotFoundError as e:
         logger.error(f"File not found: {str(e)}")
+        if 'experiment_info' in locals() and experiment_info:
+            print(f"❌ Experiment {experiment_number} ({param_name} {primary_param}) failed: File not found")
         return 1
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         logger.error("Full traceback:", exc_info=True)
+        if 'experiment_info' in locals() and experiment_info:
+            print(f"❌ Experiment {experiment_number} ({param_name} {primary_param}) failed: {str(e)}")
         return 1
     
     return 0
